@@ -1,0 +1,48 @@
+# Environment
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Docker
+docker-compose.override.yml
+
+# Storage (raw HTML snapshots etc)
+storage/raw_html/
+storage/screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Alembic (don't ignore versions — they're source code)
+# (nothing here — keep alembic/versions/*.py in git)
+
+# ML models (too large for git)
+backend/models/*.pkl
+backend/models/*.joblib
