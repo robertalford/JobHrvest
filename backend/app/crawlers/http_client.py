@@ -6,7 +6,9 @@ All requests are checked against the domain blocklist before execution.
 """
 
 import asyncio
+import hashlib
 import logging
+import threading
 import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,22 +19,35 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from app.core.config import settings
 from app.crawlers.domain_blocklist import assert_not_blocked
 
+# Lazy Redis client for ETag caching (shared across requests in a process)
+_redis_client = None
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        import redis.asyncio as aioredis
+        _redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
+
 logger = logging.getLogger(__name__)
 
 # Per-domain rate limit tracking (domain → last_request_time)
+# Use threading.Lock so it is not bound to a specific event loop
+# (asyncio.Lock() at module level causes "attached to a different loop" errors
+# when Celery creates a new event loop per task via asyncio.run())
 _rate_limit_state: dict[str, float] = {}
-_rate_limit_lock = asyncio.Lock()
+_rate_limit_lock = threading.Lock()
 
 
 async def _enforce_rate_limit(domain: str) -> None:
     """Wait if we've hit the per-domain rate limit."""
-    async with _rate_limit_lock:
+    with _rate_limit_lock:
         last = _rate_limit_state.get(domain, 0)
         elapsed = time.monotonic() - last
         wait = settings.CRAWL_RATE_LIMIT_SECONDS - elapsed
-        if wait > 0:
-            await asyncio.sleep(wait)
         _rate_limit_state[domain] = time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 class ResilientHTTPClient:
@@ -66,6 +81,10 @@ class ResilientHTTPClient:
         """
         Fetch a URL with rate limiting and blocklist enforcement.
 
+        Returns a 304 response (without raising) when the server confirms the
+        page is unchanged since the last crawl (ETag / If-None-Match). Callers
+        should check ``response.status_code == 304`` and skip extraction.
+
         Args:
             url: URL to fetch
             use_curl_cffi: Use curl_cffi for TLS fingerprint mimicry (for protected sites)
@@ -77,13 +96,31 @@ class ResilientHTTPClient:
         if use_curl_cffi:
             return await self._get_curl_cffi(url, **kwargs)
 
+        # ETag conditional request — avoids downloading unchanged pages
+        url_key = f"etag:{hashlib.md5(url.encode()).hexdigest()}"
+        request_headers = dict(self.DEFAULT_HEADERS)
+        try:
+            cached_etag = await _get_redis().get(url_key)
+            if cached_etag:
+                request_headers["If-None-Match"] = cached_etag
+        except Exception:
+            pass  # Redis unavailable — skip ETag optimisation
+
         async with httpx.AsyncClient(
-            headers=self.DEFAULT_HEADERS,
+            headers=request_headers,
             timeout=self.timeout,
             follow_redirects=True,
         ) as client:
             response = await client.get(url, **kwargs)
+            if response.status_code == 304:
+                return response  # Not Modified — caller skips extraction
             response.raise_for_status()
+            # Cache the ETag for next request
+            if etag := response.headers.get("etag"):
+                try:
+                    await _get_redis().set(url_key, etag, ex=7 * 24 * 3600)
+                except Exception:
+                    pass
             return response
 
     async def _get_curl_cffi(self, url: str, **kwargs) -> httpx.Response:
@@ -122,7 +159,10 @@ class ResilientHTTPClient:
                     user_agent=settings.CRAWL_USER_AGENT,
                     extra_http_headers={"Accept-Language": "en-AU,en;q=0.9"},
                 )
-                await page.goto(url, wait_until="networkidle", timeout=self.timeout * 1000)
+                # domcontentloaded fires when the DOM is parsed — 2-5x faster than
+                # networkidle (which waits for all network activity to stop).
+                # Career page content is DOM-driven; we don't need all assets to load.
+                await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
                 html = await page.content()
                 await browser.close()
                 return html

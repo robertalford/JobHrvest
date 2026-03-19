@@ -1,16 +1,26 @@
 """SQLAlchemy async engine and session factory."""
 
+import os
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
+
+# Celery workers call asyncio.run() once per task, creating a new event loop each time.
+# A pooled engine holds connections bound to the *previous* loop, causing:
+#   "Future attached to a different loop" errors.
+# NullPool avoids this by never reusing connections across event loop boundaries.
+# The API process uses the default pool (set CELERY_WORKER=false for FastAPI).
+_use_null_pool = os.getenv("CELERY_WORKER", "false").lower() == "true"
 
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    **({} if _use_null_pool else {"pool_size": 20, "max_overflow": 40, "pool_recycle": 3600}),
+    **({"poolclass": NullPool} if _use_null_pool else {}),
 )
 
 AsyncSessionLocal = async_sessionmaker(
