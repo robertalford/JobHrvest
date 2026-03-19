@@ -64,10 +64,163 @@ MARKETS = [
             "linkedin": ["Australia jobs", "remote jobs Australia"],
         },
     },
-    {"code": "US", "name": "United States", "is_active": False, "default_currency": "USD", "locale": "en-US", "salary_parsing_config": {}, "location_parsing_config": {}, "aggregator_search_queries": {}},
-    {"code": "UK", "name": "United Kingdom", "is_active": False, "default_currency": "GBP", "locale": "en-GB", "salary_parsing_config": {}, "location_parsing_config": {}, "aggregator_search_queries": {}},
-    {"code": "NZ", "name": "New Zealand", "is_active": False, "default_currency": "NZD", "locale": "en-NZ", "salary_parsing_config": {}, "location_parsing_config": {}, "aggregator_search_queries": {}},
-    {"code": "SG", "name": "Singapore", "is_active": False, "default_currency": "SGD", "locale": "en-SG", "salary_parsing_config": {}, "location_parsing_config": {}, "aggregator_search_queries": {}},
+    {
+        "code": "SG", "name": "Singapore", "is_active": True,
+        "default_currency": "SGD", "locale": "en-SG",
+        "salary_parsing_config": {
+            "default_currency": "SGD", "currency_symbol": "S$",
+            "annual_keywords": ["per annum", "p.a.", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "/hour", "hourly"],
+            "patterns": [
+                r"S?\$\s*(\d[\d,]*)\s*[-–]\s*S?\$\s*(\d[\d,]*)",
+                r"SGD\s*(\d[\d,]*)\s*[-–]\s*SGD\s*(\d[\d,]*)",
+                r"S?\$\s*(\d+(?:\.\d+)?)[Kk]\s*[-–]\s*S?\$\s*(\d+(?:\.\d+)?)[Kk]",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Singapore", "country_code": "SG",
+            "major_cities": ["Singapore", "Jurong", "Tampines", "Woodlands", "Sengkang", "Punggol"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Singapore", "software engineer Singapore"],
+            "linkedin": ["Singapore jobs"],
+        },
+    },
+    {
+        "code": "PH", "name": "Philippines", "is_active": True,
+        "default_currency": "PHP", "locale": "en-PH",
+        "salary_parsing_config": {
+            "default_currency": "PHP", "currency_symbol": "₱",
+            "annual_keywords": ["per annum", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "hourly"],
+            "patterns": [
+                r"₱\s*(\d[\d,]*)\s*[-–]\s*₱\s*(\d[\d,]*)",
+                r"PHP\s*(\d[\d,]*)\s*[-–]\s*PHP\s*(\d[\d,]*)",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Philippines", "country_code": "PH",
+            "major_cities": ["Manila", "Quezon City", "Makati", "Cebu City", "Davao", "Taguig", "Pasig"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Philippines", "work from home Philippines"],
+            "linkedin": ["Philippines jobs"],
+        },
+    },
+    {
+        "code": "NZ", "name": "New Zealand", "is_active": True,
+        "default_currency": "NZD", "locale": "en-NZ",
+        "salary_parsing_config": {
+            "default_currency": "NZD", "currency_symbol": "NZ$",
+            "annual_keywords": ["per annum", "p.a.", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "/hour", "hourly"],
+            "patterns": [
+                r"NZ?\$\s*(\d[\d,]*)\s*[-–]\s*NZ?\$\s*(\d[\d,]*)",
+                r"NZ?\$\s*(\d+(?:\.\d+)?)[Kk]\s*[-–]\s*NZ?\$\s*(\d+(?:\.\d+)?)[Kk]",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "New Zealand", "country_code": "NZ",
+            "state_abbreviations": {"AKL": "Auckland", "WLG": "Wellington", "CHC": "Christchurch"},
+            "major_cities": ["Auckland", "Wellington", "Christchurch", "Hamilton", "Tauranga", "Dunedin"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Flexible"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in New Zealand", "software engineer New Zealand"],
+            "linkedin": ["New Zealand jobs"],
+        },
+    },
+    {
+        "code": "MY", "name": "Malaysia", "is_active": True,
+        "default_currency": "MYR", "locale": "en-MY",
+        "salary_parsing_config": {
+            "default_currency": "MYR", "currency_symbol": "RM",
+            "annual_keywords": ["per annum", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "hourly"],
+            "patterns": [
+                r"RM\s*(\d[\d,]*)\s*[-–]\s*RM\s*(\d[\d,]*)",
+                r"MYR\s*(\d[\d,]*)\s*[-–]\s*MYR\s*(\d[\d,]*)",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Malaysia", "country_code": "MY",
+            "major_cities": ["Kuala Lumpur", "Petaling Jaya", "George Town", "Johor Bahru", "Kota Kinabalu", "Kuching"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Malaysia", "software engineer Malaysia"],
+            "linkedin": ["Malaysia jobs"],
+        },
+    },
+    {
+        "code": "ID", "name": "Indonesia", "is_active": True,
+        "default_currency": "IDR", "locale": "id-ID",
+        "salary_parsing_config": {
+            "default_currency": "IDR", "currency_symbol": "Rp",
+            "annual_keywords": ["per tahun", "per year", "annual"],
+            "hourly_keywords": ["per jam", "/hr", "hourly"],
+            "patterns": [
+                r"Rp\.?\s*(\d[\d.,]*)\s*[-–]\s*Rp\.?\s*(\d[\d.,]*)",
+                r"IDR\s*(\d[\d,]*)\s*[-–]\s*IDR\s*(\d[\d,]*)",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Indonesia", "country_code": "ID",
+            "major_cities": ["Jakarta", "Surabaya", "Bandung", "Medan", "Semarang", "Makassar", "Bali"],
+            "remote_keywords": ["Remote", "WFH", "Kerja dari Rumah", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Indonesia", "lowongan kerja Jakarta"],
+            "linkedin": ["Indonesia jobs"],
+        },
+    },
+    {
+        "code": "TH", "name": "Thailand", "is_active": True,
+        "default_currency": "THB", "locale": "th-TH",
+        "salary_parsing_config": {
+            "default_currency": "THB", "currency_symbol": "฿",
+            "annual_keywords": ["per annum", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "hourly"],
+            "patterns": [
+                r"฿\s*(\d[\d,]*)\s*[-–]\s*฿\s*(\d[\d,]*)",
+                r"THB\s*(\d[\d,]*)\s*[-–]\s*THB\s*(\d[\d,]*)",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Thailand", "country_code": "TH",
+            "major_cities": ["Bangkok", "Chiang Mai", "Phuket", "Nonthaburi", "Pak Kret"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Thailand", "software engineer Bangkok"],
+            "linkedin": ["Thailand jobs"],
+        },
+    },
+    {
+        "code": "HK", "name": "Hong Kong", "is_active": True,
+        "default_currency": "HKD", "locale": "en-HK",
+        "salary_parsing_config": {
+            "default_currency": "HKD", "currency_symbol": "HK$",
+            "annual_keywords": ["per annum", "p.a.", "per year", "annual"],
+            "hourly_keywords": ["per hour", "/hr", "hourly"],
+            "patterns": [
+                r"HK?\$\s*(\d[\d,]*)\s*[-–]\s*HK?\$\s*(\d[\d,]*)",
+                r"HKD\s*(\d[\d,]*)\s*[-–]\s*HKD\s*(\d[\d,]*)",
+                r"HK?\$\s*(\d+(?:\.\d+)?)[Kk]\s*[-–]\s*HK?\$\s*(\d+(?:\.\d+)?)[Kk]",
+            ],
+        },
+        "location_parsing_config": {
+            "country": "Hong Kong", "country_code": "HK",
+            "major_cities": ["Hong Kong", "Kowloon", "New Territories", "Central", "Wan Chai", "Tsim Sha Tsui"],
+            "remote_keywords": ["Remote", "WFH", "Work from Home", "Hybrid"],
+        },
+        "aggregator_search_queries": {
+            "indeed": ["jobs in Hong Kong", "software engineer Hong Kong"],
+            "linkedin": ["Hong Kong jobs"],
+        },
+    },
 ]
 
 BLOCKED_DOMAINS = [
@@ -189,7 +342,7 @@ async def seed():
                 INSERT INTO markets (id, code, name, is_active, default_currency, locale,
                     salary_parsing_config, location_parsing_config, aggregator_search_queries)
                 VALUES (:id, :code, :name, :is_active, :default_currency, :locale,
-                    :salary::jsonb, :location::jsonb, :queries::jsonb)
+                    CAST(:salary AS JSONB), CAST(:location AS JSONB), CAST(:queries AS JSONB))
                 ON CONFLICT (code) DO NOTHING
             """), {
                 "id": str(uuid.uuid4()), "code": m["code"], "name": m["name"],

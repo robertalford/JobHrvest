@@ -8,6 +8,7 @@ from app.models.job import Job, JobTag
 from app.models.crawl_log import CrawlLog
 from app.models.site_template import SiteTemplate
 from app.models.extraction_comparison import ExtractionComparison
+from app.models.lead_import import LeadImport
 
 __all__ = [
     "Market",
@@ -20,4 +21,5 @@ __all__ = [
     "CrawlLog",
     "SiteTemplate",
     "ExtractionComparison",
+    "LeadImport",
 ]

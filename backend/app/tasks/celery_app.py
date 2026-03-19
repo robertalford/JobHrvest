@@ -22,11 +22,30 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    # Beat schedule for periodic crawling
+    task_routes={
+        "crawl.company": {"queue": "crawl"},
+        "crawl.career_page": {"queue": "crawl"},
+        "crawl.full_cycle": {"queue": "default"},
+        "crawl.harvest_aggregators": {"queue": "discovery"},
+        "crawl.mark_inactive_jobs": {"queue": "default"},
+        "crawl.validate_page_template": {"queue": "default"},
+        "ml.*": {"queue": "ml"},
+    },
     beat_schedule={
+        # Main crawl cycle — every hour, picks up sites due for crawling
         "scheduled-crawl-cycle": {
-            "task": "app.tasks.crawl_tasks.scheduled_crawl_cycle",
-            "schedule": 3600,  # every hour — picks up sites whose next_crawl_at has passed
+            "task": "crawl.scheduled",
+            "schedule": 3600,
+        },
+        # Aggregator discovery — every 6 hours, find new companies via Indeed AU
+        "harvest-aggregators": {
+            "task": "crawl.harvest_aggregators",
+            "schedule": 6 * 3600,
+        },
+        # Job lifecycle — mark stale jobs inactive daily
+        "mark-inactive-jobs": {
+            "task": "crawl.mark_inactive_jobs",
+            "schedule": 24 * 3600,
         },
     },
 )

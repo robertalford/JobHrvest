@@ -29,6 +29,17 @@ export const triggerFullCrawl = () => api.post('/crawl/trigger-full').then(r => 
 export const getFieldCoverage = () => api.get('/analytics/field-coverage').then(r => r.data);
 export const getExtractionAccuracy = () => api.get('/analytics/extraction-accuracy').then(r => r.data);
 export const getTrends = () => api.get('/analytics/trends').then(r => r.data);
+export const getQualityDistribution = () => api.get('/analytics/quality-distribution').then(r => r.data);
+export const getQualityBySite = () => api.get('/analytics/quality-by-site').then(r => r.data);
+export const triggerQualityScoring = () => api.post('/analytics/trigger-quality-scoring').then(r => r.data);
 
 // System
 export const getSystemHealth = () => api.get('/health').then(r => r.data);
+
+// Lead Imports
+export const getLeadImportSummary = () =>
+  api.get('/lead-imports/summary').then(r => r.data);
+export const getLeadImports = (params?: Record<string, unknown>) =>
+  api.get('/lead-imports/', { params }).then(r => r.data);
+export const triggerLeadImport = (params?: { csv_path?: string; limit?: number; country?: string }) =>
+  api.post('/lead-imports/trigger', null, { params }).then(r => r.data);

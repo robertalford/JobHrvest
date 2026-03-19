@@ -51,6 +51,8 @@ async def list_jobs(
     is_active: Optional[bool] = True,
     salary_min: Optional[float] = None,
     salary_max: Optional[float] = None,
+    quality_min: Optional[float] = Query(None, ge=0, le=100),
+    quality_band: Optional[str] = Query(None, pattern="^(excellent|good|fair|poor|disqualified)$"),
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Job)
@@ -74,6 +76,18 @@ async def list_jobs(
         q = q.where(Job.salary_min >= salary_min)
     if salary_max is not None:
         q = q.where(Job.salary_max <= salary_max)
+    if quality_min is not None:
+        q = q.where(Job.quality_score >= quality_min)
+    if quality_band:
+        band_ranges = {
+            "excellent": (80, 101),
+            "good": (60, 80),
+            "fair": (40, 60),
+            "poor": (20, 40),
+            "disqualified": (0, 20),
+        }
+        lo, hi = band_ranges[quality_band]
+        q = q.where(Job.quality_score >= lo, Job.quality_score < hi)
 
     total = await db.scalar(select(func.count()).select_from(q.subquery()))
     items = await db.scalars(q.order_by(Job.first_seen_at.desc()).offset((page - 1) * page_size).limit(page_size))

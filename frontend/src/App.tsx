@@ -7,6 +7,7 @@ import { CareerPages } from './components/pages/CareerPages';
 import { Jobs } from './components/pages/Jobs';
 import { CrawlMonitor } from './components/pages/CrawlMonitor';
 import { Analytics } from './components/pages/Analytics';
+import { LeadImports } from './components/pages/LeadImports';
 import { Settings } from './components/pages/Settings';
 
 const queryClient = new QueryClient({
@@ -25,6 +26,7 @@ export default function App() {
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/crawl" element={<CrawlMonitor />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/lead-imports" element={<LeadImports />} />
             <Route path="/settings" element={<Settings />} />
           </Route>
         </Routes>

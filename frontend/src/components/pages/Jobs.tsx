@@ -3,14 +3,52 @@ import { useQuery } from '@tanstack/react-query';
 import { getJobs } from '../../lib/api';
 import { Search, Download } from 'lucide-react';
 
+const BAND_COLORS: Record<string, string> = {
+  excellent: '#0e8136',
+  good: '#22c55e',
+  fair: '#eab308',
+  poor: '#f97316',
+  disqualified: '#ef4444',
+};
+
+function qualityBand(score: number | null): string {
+  if (score === null || score === undefined) return 'unscored';
+  if (score >= 80) return 'excellent';
+  if (score >= 60) return 'good';
+  if (score >= 40) return 'fair';
+  if (score >= 20) return 'poor';
+  return 'disqualified';
+}
+
+function QualityBadge({ score }: { score: number | null }) {
+  const band = qualityBand(score);
+  if (band === 'unscored') return <span className="text-gray-300 text-xs">—</span>;
+  return (
+    <span
+      className="inline-block px-1.5 py-0.5 rounded text-xs font-semibold text-white"
+      style={{ backgroundColor: BAND_COLORS[band] ?? '#6b7280' }}
+      title={band}
+    >
+      {score !== null ? Math.round(score) : '?'}
+    </span>
+  );
+}
+
 export function Jobs() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [remoteType, setRemoteType] = useState('');
+  const [qualityBandFilter, setQualityBandFilter] = useState('');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['jobs', search, page, remoteType],
-    queryFn: () => getJobs({ search, page, page_size: 50, remote_type: remoteType || undefined }),
+    queryKey: ['jobs', search, page, remoteType, qualityBandFilter],
+    queryFn: () => getJobs({
+      search,
+      page,
+      page_size: 50,
+      remote_type: remoteType || undefined,
+      quality_band: qualityBandFilter || undefined,
+    }),
     staleTime: 30000,
   });
 
@@ -47,22 +85,34 @@ export function Jobs() {
           <option value="hybrid">Hybrid</option>
           <option value="onsite">On-site</option>
         </select>
+        <select
+          value={qualityBandFilter}
+          onChange={e => { setQualityBandFilter(e.target.value); setPage(1); }}
+          className="px-3 py-2 border border-gray-200 rounded-md text-sm text-gray-700 focus:outline-none"
+        >
+          <option value="">All quality</option>
+          <option value="excellent">Excellent (80+)</option>
+          <option value="good">Good (60-79)</option>
+          <option value="fair">Fair (40-59)</option>
+          <option value="poor">Poor (20-39)</option>
+          <option value="disqualified">Disqualified (0-19)</option>
+        </select>
       </div>
 
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
-              {['Title', 'Company', 'Location', 'Type', 'Salary', 'Method', 'First Seen'].map(h => (
+              {['Title', 'Company', 'Location', 'Type', 'Salary', 'Quality', 'Method', 'First Seen'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {isLoading ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>
             ) : !data?.items?.length ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No jobs found. Run a crawl to extract job listings.</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No jobs found. Run a crawl to extract job listings.</td></tr>
             ) : (
               data.items.map((j: Record<string, unknown>) => (
                 <tr key={String(j.id)} className="hover:bg-gray-50 cursor-pointer">
@@ -78,6 +128,9 @@ export function Jobs() {
                     {j.employment_type ? <span className="badge-gray">{String(j.employment_type).replace('_', ' ')}</span> : '—'}
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">{j.salary_raw ? String(j.salary_raw).slice(0, 30) : '—'}</td>
+                  <td className="px-4 py-3">
+                    <QualityBadge score={j.quality_score as number | null} />
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`badge ${j.extraction_method === 'schema_org' ? 'badge-green' : j.extraction_method === 'ats_api' ? 'badge-blue' : 'badge-gray'}`}>
                       {j.extraction_method ? String(j.extraction_method) : '—'}

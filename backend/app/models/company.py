@@ -29,6 +29,8 @@ class Company(Base):
     requires_js_rendering: Mapped[bool] = mapped_column(Boolean, default=False)
     anti_bot_level: Mapped[str] = mapped_column(Text, default="none")
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

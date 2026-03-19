@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Building2, Briefcase, Globe, BarChart3, Settings, Activity,
+  LayoutDashboard, Building2, Briefcase, Globe, BarChart3, Settings, Activity, Upload,
 } from 'lucide-react';
 
 const nav = [
@@ -10,6 +10,7 @@ const nav = [
   { to: '/jobs', icon: Briefcase, label: 'Jobs' },
   { to: '/crawl', icon: Activity, label: 'Crawl Monitor' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
+  { to: '/lead-imports', icon: Upload, label: 'Lead Imports' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
@@ -47,7 +48,7 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="p-3 border-t border-gray-200">
-        <div className="text-xs text-gray-400 text-center">v0.1.0 — Phase 1</div>
+        <div className="text-xs text-gray-400 text-center">v0.2.0 — Multi-Market</div>
       </div>
     </aside>
   );

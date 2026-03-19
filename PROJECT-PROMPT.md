@@ -758,3 +758,98 @@ Build a simple evaluation script that can be run against a manually-verified tes
 - When in doubt, err on the side of extracting more data (false positives are easier to clean than missed listings).
 - Keep the raw data — always store raw HTML and raw extraction results so you can reprocess later.
 - If you hit a decision point where you need guidance, document the options and tradeoffs clearly and ask — but do not delegate manual tasks like researching ATS page structures, writing seed data, or training models. Handle all of this autonomously.
+---
+
+## Job Quality Scoring System (v1 Scope — added 2026-03-19)
+
+### Overview
+
+Every extracted job must be scored for quality. Quality scoring serves two purposes:
+1. Filter out low-quality / harmful jobs from user-facing views
+2. Score sites at an aggregate level (not just an average — extremes matter more)
+
+### Quality Dimensions
+
+**1. Field Completeness (positive score, 0–50 pts)**
+- title present and looks like a real job title (not clickbait like "Amazing opportunity!") — 10 pts
+- location present — 8 pts
+- employment_type (full_time/part_time/contract/etc.) — 7 pts
+- description length ≥ 150 chars — 10 pts (0 if missing, partial if short)
+- date_posted present — 5 pts
+- salary or compensation present — 5 pts
+- requirements or responsibilities described — 5 pts
+
+**2. Description Quality (positive modifier, 0–20 pts)**
+- Substantive description (≥ 500 chars, contains multiple sentences): +20
+- Reasonable (150–499 chars): +10
+- Very short (< 150 chars): +0
+- Just a few words/single sentence: -5
+
+**3. Scam Detection (high-impact penalty, up to -100)**
+Apply immediately — any scam signal scores the job at max 10 final score.
+Patterns: asking for bank account, wire transfer, sending money, no interview required, guaranteed income, work from home earn $XXXK, send resume to gmail/hotmail, pay for training, multi-level marketing, MLM.
+
+**4. Inappropriate Content — Bad Words (high-impact penalty, up to -80)**
+Any profanity/obscenity in title or description scores the job at max 15 final score.
+
+**5. Discrimination Language (high-impact penalty, up to -90)**
+Any mention of preferred age, gender, ethnicity, nationality, religion, or marital status in requirements/description scores the job at max 10 final score.
+Detection patterns: "must be under 35", "female preferred", "Chinese nationals only", "Christian values required", "family man", specific ethnic group preferences.
+
+### Final Score Calculation
+
+```
+final_score = max(0, min(100, completeness_score + description_quality_score))
+if scam_detected: final_score = min(final_score, 10)
+if bad_words_detected: final_score = min(final_score, 15)
+if discrimination_detected: final_score = min(final_score, 10)
+```
+
+Score bands:
+- 80–100: Excellent
+- 60–79: Good
+- 40–59: Fair
+- 20–39: Poor
+- 0–19: Disqualified (scam/harmful)
+
+### Site/Company Quality Score
+
+Not a simple average. Algorithm:
+1. Compute all job scores for a company.
+2. `base_site_score` = weighted average (recent jobs weighted 2x)
+3. Penalty if ANY job has scam_detected: site_score = min(site_score, 20)
+4. Penalty if ANY job has discrimination_detected: site_score = min(site_score, 25)
+5. Penalty proportional to % of bad-quality jobs (< 20 score)
+6. Store as `quality_score` on companies table (add via migration)
+
+### Database Schema (new columns, migration 0003)
+
+Add to **jobs** table:
+- `quality_score` (float, nullable) — 0–100 final score
+- `quality_completeness` (float) — field completeness subscores
+- `quality_description` (float) — description quality score
+- `quality_issues` (jsonb) — list of detected issues with details
+- `quality_flags` (jsonb) — boolean flags: scam_detected, bad_words_detected, discrimination_detected
+- `quality_scored_at` (timestamptz)
+
+Add to **companies** table:
+- `quality_score` (float, nullable) — aggregate site score
+- `quality_scored_at` (timestamptz)
+
+### Implementation
+
+- `app/services/quality_scorer.py` — deterministic rule-based scorer
+- Scorer runs automatically after every job extraction (in job_extractor.py)
+- Celery task `score_all_jobs` to backfill existing jobs
+- API endpoint `GET /api/v1/analytics/quality-distribution` — score distribution by band
+- API endpoint `GET /api/v1/jobs?quality_min=60` — filter jobs by quality
+- Frontend: quality badge on job cards (color-coded by band)
+- Analytics page: quality distribution chart, top/bottom quality sites
+
+### UI Visibility
+
+- Job list: show colored quality badge (green/yellow/red) with score
+- Job detail: show quality breakdown (completeness, description, any flags)
+- Company list: show site quality score column
+- Analytics: quality distribution histogram, issues breakdown pie chart
+

@@ -47,6 +47,13 @@ class Job(Base):
     extraction_method: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # structural, llm, schema_org, ats_api, hybrid
     extraction_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Quality scoring
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_completeness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_description: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_issues: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    quality_flags: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    quality_scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
