@@ -287,12 +287,34 @@ async def _clear_unresolved_cache() -> int:
     from app.db.base import AsyncSessionLocal
     from sqlalchemy import text
     async with AsyncSessionLocal() as db:
-        r = await db.execute(text("DELETE FROM geocode_cache WHERE resolution_method = 'unresolved'"))
+        # Delete unresolved and placeholder cache entries to allow fresh attempts
+        r = await db.execute(text(
+            "DELETE FROM geocode_cache WHERE resolution_method IN ('unresolved', 'no_location')"
+        ))
         await db.commit()
         n = r.rowcount or 0
         if n:
             logger.info("retro_geocode_jobs: cleared %d stale unresolved cache entries", n)
         return n
+
+
+_country_geo_cache: dict[str, object] = {}
+
+async def _get_country_geo_id(db, market_code: str):
+    """Return the geo_locations.id for the country-level record of market_code."""
+    if market_code in _country_geo_cache:
+        return _country_geo_cache[market_code]
+    from sqlalchemy import text as _text
+    cc = MARKET_COUNTRY.get(market_code)
+    if not cc:
+        return None
+    r = await db.execute(_text(
+        "SELECT id FROM geo_locations WHERE country_code = :cc AND level = 1 AND is_active = true LIMIT 1"
+    ), {"cc": cc})
+    row = r.fetchone()
+    geo_id = row[0] if row else None
+    _country_geo_cache[market_code] = geo_id
+    return geo_id
 
 
 async def _geocode_batch(limit: int, include_failed: bool) -> dict:
@@ -333,12 +355,26 @@ async def _geocode_batch(limit: int, include_failed: bool) -> dict:
             ) or None
 
             if not loc_text:
-                await db.execute(text("""
-                    UPDATE jobs
-                    SET geo_resolved = false, geo_resolution_method = 'no_location'
-                    WHERE id = :id
-                """), {"id": str(job_id)})
-                stats["failed"] += 1
+                # Fallback: assign country-level geo for the job's market
+                country_geo_id = await _get_country_geo_id(db, market_code or "AU")
+                if country_geo_id:
+                    await db.execute(text("""
+                        UPDATE jobs SET
+                            geo_location_id       = :geo_id,
+                            geo_level             = 1,
+                            geo_confidence        = 0.3,
+                            geo_resolution_method = 'market_country_fallback',
+                            geo_resolved          = true
+                        WHERE id = :id
+                    """), {"geo_id": str(country_geo_id), "id": str(job_id)})
+                    stats["resolved"] += 1
+                else:
+                    await db.execute(text("""
+                        UPDATE jobs
+                        SET geo_resolved = false, geo_resolution_method = 'no_location'
+                        WHERE id = :id
+                    """), {"id": str(job_id)})
+                    stats["failed"] += 1
             else:
                 geo = await geocoder_service.geocode(db, loc_text, market_code or "AU")
                 if geo:
@@ -369,3 +405,46 @@ async def _geocode_batch(limit: int, include_failed: bool) -> dict:
         await db.commit()
 
     return stats
+
+
+@celery_app.task(name="geocoder.geocode_all_failed", bind=True, time_limit=7200)
+def geocode_all_failed(self):
+    """One-shot: reset no_location jobs + clear bad cache + retro geocode everything."""
+    import asyncio
+    from app.db.base import AsyncSessionLocal
+    from sqlalchemy import text
+
+    async def _run_all():
+        async with AsyncSessionLocal() as db:
+            # 1. Reset jobs stuck as geo_resolved=false so they retry
+            r = await db.execute(text("""
+                UPDATE jobs SET geo_resolved = NULL, geo_resolution_method = NULL,
+                    geo_location_id = NULL, geo_level = NULL, geo_confidence = NULL
+                WHERE geo_resolved = false
+                  OR (geo_resolved = true AND geo_resolution_method = 'market_country_fallback'
+                      AND (location_raw IS NOT NULL AND location_raw != ''))
+            """))
+            reset_count = r.rowcount or 0
+            await db.commit()
+            logger.info("geocode_all_failed: reset %d jobs", reset_count)
+
+            # 2. Clear polluted cache entries
+            await db.execute(text("""
+                DELETE FROM geocode_cache
+                WHERE resolution_method IN ('unresolved', 'no_location')
+                   OR (geo_location_id IS NULL AND use_count > 100)
+            """))
+            await db.commit()
+
+        # 3. Run retro geocode in batches until complete
+        total = {"processed": 0, "resolved": 0, "failed": 0}
+        while True:
+            result = asyncio.run(_geocode_batch(limit=500, include_failed=True))
+            if result["processed"] == 0:
+                break
+            for k in total:
+                total[k] += result[k]
+            logger.info("geocode_all_failed progress: %s", total)
+        return total
+
+    return asyncio.run(_run_all())

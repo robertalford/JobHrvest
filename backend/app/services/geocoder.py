@@ -31,9 +31,54 @@ _REMOTE_TOKENS = frozenset([
     "remote", "wfh", "work from home", "anywhere", "virtual",
     "distributed", "telecommute", "home-based", "home based",
     "fully remote", "remote first", "remote-first", "remote only",
+    "hybrid", "flexible", "on-site", "onsite", "in-office",
+    "work from anywhere", "globally remote", "open to remote",
 ])
 
 _FUZZY_THRESHOLD = 0.35
+
+# Text that looks like a location but is actually a placeholder or non-place
+_PLACEHOLDER_TOKENS = frozenset([
+    "location", "details", "multiple locations", "various", "various locations",
+    "tbc", "tbd", "see description", "see job description", "n/a", "na",
+    "not specified", "to be confirmed", "multiple", "nationwide", "global",
+])
+
+# Market detection from location text — used to override company market for geocoding
+_MARKET_TEXT_HINTS: list[tuple[str, list[str]]] = [
+    ("AU", ["nsw", "new south wales", "victoria", "vic", "qld", "queensland",
+            "south australia", " sa ", "western australia", " wa ", "act ",
+            "northern territory", " nt ", "tasmania", "tas", "canberra",
+            "melbourne", "sydney", "brisbane", "perth", "adelaide", "darwin",
+            "gold coast", "newcastle", "wollongong", "geelong", "hobart",
+            "australia", "australian"]),
+    ("NZ", ["new zealand", "auckland", "wellington", "christchurch",
+            "hamilton", "tauranga", "napier", "hastings", "dunedin",
+            "palmerston north", " nz "]),
+    ("SG", ["singapore", " sg "]),
+    ("HK", ["hong kong", " hk ", "kowloon", "new territories"]),
+    ("MY", ["malaysia", "kuala lumpur", " kl ", "penang", "johor",
+            "selangor", "sabah", "sarawak", "malaysian"]),
+    ("PH", ["philippines", "manila", "cebu", "davao", "quezon",
+            "makati", "taguig", "filipino"]),
+    ("ID", ["indonesia", "jakarta", "bali", "surabaya", "bandung",
+            "medan", "semarang", "indonesian"]),
+    ("TH", ["thailand", "bangkok", "phuket", "chiang mai", "thai"]),
+]
+
+
+def _detect_market(text: str) -> Optional[str]:
+    """Detect the most likely market from location text itself."""
+    t = " " + text.lower() + " "
+    for market, hints in _MARKET_TEXT_HINTS:
+        for hint in hints:
+            if hint in t:
+                return market
+    return None
+
+
+def _is_placeholder(text: str) -> bool:
+    return text.strip().lower() in _PLACEHOLDER_TOKENS
 
 
 @dataclass
@@ -139,45 +184,60 @@ class GeocoderService:
 
         market_code = (market_code or "AU").upper()
         normalised = _normalise(raw_text)
-        if not normalised or _is_remote(normalised):
+        if not normalised or _is_remote(normalised) or _is_placeholder(normalised):
             return None
 
-        # 1. Cache
-        cached = await self._get_cache(db, raw_text, market_code)
+        # Override market_code if the location text reveals a different market
+        detected_market = _detect_market(normalised)
+        effective_market = detected_market or market_code
+
+        # 1. Cache (use effective market for lookup)
+        cached = await self._get_cache(db, raw_text, effective_market)
         if cached is not None:
             return cached  # False → cached failure, None → miss
 
-        # 2 & 3. Try each candidate term
+        # 2 & 3. Try each candidate term with effective market
         terms = _split_terms(normalised)
-        result = await self._try_terms(db, terms, market_code, "exact")
+        result = await self._try_terms(db, terms, effective_market, "exact")
         if result:
-            await self._set_cache(db, raw_text, market_code, result)
+            await self._set_cache(db, raw_text, effective_market, result)
             return result
 
-        result = await self._try_terms(db, terms, market_code, "fuzzy")
+        result = await self._try_terms(db, terms, effective_market, "fuzzy")
         if result:
-            await self._set_cache(db, raw_text, market_code, result)
+            await self._set_cache(db, raw_text, effective_market, result)
             return result
+
+        # 3b. Multi-market fallback: try all other markets if detection failed
+        if not detected_market:
+            for try_market in MARKET_COUNTRY:
+                if try_market == effective_market:
+                    continue
+                result = await self._try_terms(db, terms, try_market, "exact")
+                if result:
+                    result.method = "exact"
+                    await self._set_cache(db, raw_text, effective_market, result)
+                    return result
 
         # 4. LLM → re-try exact + fuzzy on LLM-extracted terms
-        llm_terms = await self._llm_extract(normalised, market_code)
+        llm_terms = await self._llm_extract(normalised, effective_market)
         if llm_terms:
-            result = await self._try_terms(db, llm_terms, market_code, "llm")
+            result = await self._try_terms(db, llm_terms, effective_market, "llm")
             if result:
                 result.method = "llm"
-                await self._set_cache(db, raw_text, market_code, result)
+                await self._set_cache(db, raw_text, effective_market, result)
                 return result
 
-            result = await self._try_terms(db, llm_terms, market_code, "fuzzy")
+            result = await self._try_terms(db, llm_terms, effective_market, "fuzzy")
             if result:
                 result.method = "llm_fuzzy"
                 result.confidence *= 0.9
-                await self._set_cache(db, raw_text, market_code, result)
+                await self._set_cache(db, raw_text, effective_market, result)
                 return result
 
         # 5. Cache as unresolvable
-        logger.debug("geocoder: unresolvable '%s' (%s)", raw_text, market_code)
-        await self._set_cache(db, raw_text, market_code, None)
+        logger.debug("geocoder: unresolvable '%s' (%s→%s)", raw_text, market_code, effective_market)
+        await self._set_cache(db, raw_text, effective_market, None)
         return None
 
     # ── internal resolution ───────────────────────────────────────────────────

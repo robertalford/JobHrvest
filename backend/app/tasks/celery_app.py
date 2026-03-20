@@ -57,6 +57,7 @@ celery_app.conf.update(
         "geocoder.seed_geonames": {"queue": "default"},
         "geocoder.geocode_new_jobs": {"queue": "default"},
         "geocoder.retro_geocode_jobs": {"queue": "default"},
+        "geocoder.geocode_all_failed": {"queue": "default"},
     },
     beat_schedule={
         # ── Queue drains ─────────────────────────────────────────────────────
@@ -97,8 +98,8 @@ celery_app.conf.update(
         # Geocode newly crawled jobs — every 2 min
         "geocode-new-jobs": {
             "task": "geocoder.geocode_new_jobs",
-            "schedule": 2 * 60,
-            "kwargs": {"limit": 200},
+            "schedule": 30,
+            "kwargs": {"limit": 500},
         },
         # Location rescue — fetch individual job pages to fill missing location_raw.
         # Runs every 10 min until backlog is cleared, then becomes a no-op.
