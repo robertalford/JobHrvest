@@ -439,7 +439,7 @@ def geocode_all_failed(self):
         # 3. Run retro geocode in batches until complete
         total = {"processed": 0, "resolved": 0, "failed": 0}
         while True:
-            result = asyncio.run(_geocode_batch(limit=500, include_failed=True))
+            result = await _geocode_batch(limit=500, include_failed=True)
             if result["processed"] == 0:
                 break
             for k in total:

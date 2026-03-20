@@ -54,10 +54,10 @@ celery_app.conf.update(
         "domain_import.asic": {"queue": "default"},
         "domain_import.wikidata": {"queue": "default"},
         # Geocoder tasks
-        "geocoder.seed_geonames": {"queue": "default"},
-        "geocoder.geocode_new_jobs": {"queue": "default"},
-        "geocoder.retro_geocode_jobs": {"queue": "default"},
-        "geocoder.geocode_all_failed": {"queue": "default"},
+        "geocoder.seed_geonames": {"queue": "geocoder"},
+        "geocoder.geocode_new_jobs": {"queue": "geocoder"},
+        "geocoder.retro_geocode_jobs": {"queue": "geocoder"},
+        "geocoder.geocode_all_failed": {"queue": "geocoder"},
     },
     beat_schedule={
         # ── Queue drains ─────────────────────────────────────────────────────
