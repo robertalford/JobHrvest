@@ -138,6 +138,10 @@ class LeverExtractor(BaseATSExtractor):
                 wp = item.get("workplaceType", "")
                 if wp and wp.lower() not in ("on-site", "onsite", "remote", "hybrid", ""):
                     location_raw = wp
+            sal = item.get("salaryRange") or {}
+            sal_raw = None
+            if sal.get("min") or sal.get("max"):
+                sal_raw = f"{sal.get('currency','')} {sal.get('min','')}-{sal.get('max','')} {sal.get('interval','')}" .strip()
             jobs.append({
                 "external_id": item.get("id"),
                 "title": item.get("text", ""),
@@ -148,6 +152,10 @@ class LeverExtractor(BaseATSExtractor):
                 "department": cats.get("department"),
                 "team": cats.get("team"),
                 "employment_type": cats.get("commitment"),
+                "salary_raw": sal_raw,
+                "salary_min": sal.get("min"),
+                "salary_max": sal.get("max"),
+                "salary_currency": sal.get("currency"),
                 "extraction_method": "ats_api",
                 "extraction_confidence": 0.98,
                 "raw_data": item,
@@ -349,7 +357,7 @@ class AshbyExtractor(BaseATSExtractor):
         slug = urlparse(url).path.strip("/").split("/")[0]
         if slug:
             try:
-                api_url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+                api_url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
                 async with httpx.AsyncClient(headers=self.headers, timeout=30) as client:
                     resp = await client.get(api_url)
                     resp.raise_for_status()
@@ -364,6 +372,7 @@ class AshbyExtractor(BaseATSExtractor):
                         "location_raw": item.get("locationName", ""),
                         "department": item.get("departmentName", ""),
                         "employment_type": item.get("employmentType", ""),
+                        "salary_raw": item.get("compensationTierSummary") or None,
                         "extraction_method": "ats_api",
                         "extraction_confidence": 0.97,
                         "raw_data": item,
