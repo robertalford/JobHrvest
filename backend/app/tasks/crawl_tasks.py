@@ -1009,3 +1009,71 @@ def rescue_job_locations(self, limit: int = 300):
     return _run_async(_run())
 
     _run_async(_run())
+
+
+@celery_app.task(name="crawl.score_unscored_jobs", bind=True, max_retries=1)
+def score_unscored_jobs(self, batch_size: int = 2000):
+    """Backfill quality scores for jobs that have never been scored.
+    Runs on beat every 10 minutes to keep quality data up to date."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.job import Job
+        from app.models.company import Company
+        from app.services.quality_scorer import score_job, compute_site_quality
+        from sqlalchemy import select, or_
+
+        async with AsyncSessionLocal() as db:
+            unscored = list(await db.scalars(
+                select(Job)
+                .where(Job.is_active == True, Job.quality_score.is_(None))
+                .order_by(Job.created_at.desc())
+                .limit(batch_size)
+            ))
+            if not unscored:
+                logger.info("score_unscored_jobs: nothing to score")
+                return 0
+
+            scored_count = 0
+            company_scores: dict = {}
+
+            for j in unscored:
+                try:
+                    qr = score_job(
+                        title=j.title, description=j.description,
+                        location_raw=j.location_raw, employment_type=j.employment_type,
+                        date_posted=j.date_posted, salary_raw=j.salary_raw,
+                        requirements=j.requirements, source_url=j.source_url,
+                    )
+                    j.quality_score = qr.score
+                    j.quality_completeness = qr.completeness_score
+                    j.quality_description = qr.description_score
+                    j.quality_issues = qr.issues
+                    j.quality_flags = {
+                        "scam_detected": qr.scam_detected,
+                        "bad_words_detected": qr.bad_words_detected,
+                        "discrimination_detected": qr.discrimination_detected,
+                    }
+                    j.quality_scored_at = datetime.now(timezone.utc)
+                    scored_count += 1
+                    cid = str(j.company_id)
+                    company_scores.setdefault(cid, []).append(qr.score)
+                except Exception as e:
+                    logger.debug(f"score_unscored_jobs: failed for job {j.id}: {e}")
+
+            # Update company quality scores
+            for cid, scores in company_scores.items():
+                try:
+                    from app.services.quality_scorer import compute_site_quality
+                    company = await db.get(Company, uuid.UUID(cid))
+                    if company:
+                        company.quality_score = compute_site_quality(scores, False, False)
+                        company.quality_scored_at = datetime.now(timezone.utc)
+                except Exception:
+                    pass
+
+            await db.commit()
+            logger.info(f"score_unscored_jobs: scored {scored_count}/{len(unscored)} jobs")
+            return scored_count
+
+    return _run_async(_run())
+

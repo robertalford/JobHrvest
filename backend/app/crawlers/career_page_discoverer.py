@@ -54,6 +54,7 @@ ATS_URL_TEMPLATES = {
     "jobvite": "https://jobs.jobvite.com/{slug}",
     "workday": None,  # URL varies per company — discovered via heuristics
     "pageup": "https://careers.pageuppeople.com/{slug}/external/",
+    "applynow": "https://{slug}.applynow.net.au/careers/opportunities/jobs",
 }
 
 # Common career subdomain prefixes to probe

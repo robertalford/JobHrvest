@@ -971,9 +971,16 @@ class JobExtractor:
             if not data.get("remote_type"):
                 data["remote_type"] = parsed_loc.remote_type
 
-        # Default country to AU for AU-market companies
-        if not data.get("location_country") and company.market_code == "AU":
-            data["location_country"] = "Australia"
+        # Market-based country fallback for all supported markets
+        _MARKET_COUNTRIES = {
+            "AU": "Australia", "NZ": "New Zealand", "SG": "Singapore",
+            "MY": "Malaysia", "HK": "Hong Kong", "PH": "Philippines",
+            "ID": "Indonesia", "TH": "Thailand",
+        }
+        if not data.get("location_country") and company.market_code:
+            country = _MARKET_COUNTRIES.get(company.market_code)
+            if country:
+                data["location_country"] = country
 
         # Salary normalization
         if data.get("salary_raw") and not data.get("salary_min"):

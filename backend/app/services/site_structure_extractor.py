@@ -31,12 +31,73 @@ class SiteStructureExtractor:
     def __init__(self, db):
         self.db = db
 
+    # ATS platforms that have working API extractors — skip structure detection,
+    # mark as ok immediately so the job_crawling phase handles via ATS API.
+    _ATS_API_PLATFORMS = frozenset([
+        "greenhouse", "lever", "ashby", "workday", "bamboohr",
+        "smartrecruiters", "jobvite", "icims", "pageup", "applynow",
+    ])
+    # ATS URL patterns for URL-based fast detection (no DB query needed)
+    _ATS_URL_SIGNALS = [
+        "boards.greenhouse.io", "job-boards.greenhouse.io",
+        "jobs.lever.co", "jobs.ashbyhq.com", "myworkdayjobs.com",
+        ".bamboohr.com", "jobs.jobvite.com", "careers.smartrecruiters.com",
+        "icims.com", "pageuppeople.com", "applynow.net.au",
+    ]
+    # JS-only ATS platforms — also set requires_js_rendering flag
+    _JS_ONLY_ATS = frozenset(["workday", "icims", "taleo"])
+    _JS_ONLY_URL_SIGNALS = ["myworkdayjobs.com", "icims.com", "taleo.net"]
+
     async def extract(self, career_page) -> bool:
         """
         Run all extraction layers. Returns True if structure was successfully mapped.
         Updates career_page.site_status on completion.
         """
         logger.info(f"SiteStructureExtractor: starting for {career_page.url}")
+
+        # ── Layer 0: ATS API shortcut ─────────────────────────────────────────
+        # If this page belongs to a known API-backed ATS, skip all structure
+        # detection layers — jobs are extracted via the ATS API at crawl time.
+        url_lower = (career_page.url or "").lower()
+        url_is_ats = any(sig in url_lower for sig in self._ATS_URL_SIGNALS)
+        ats_platform = None
+
+        if not url_is_ats:
+            # Check company ats_platform from DB
+            try:
+                from app.models.company import Company as _Company
+                company = await self.db.get(_Company, career_page.company_id)
+                if company:
+                    ats_platform = company.ats_platform
+                    if ats_platform in self._ATS_API_PLATFORMS:
+                        url_is_ats = True
+            except Exception as _e:
+                logger.debug(f"Layer 0 company lookup failed: {_e}")
+
+        if url_is_ats:
+            # Mark requires_js_rendering for JS-only ATS platforms
+            is_js_only = (
+                ats_platform in self._JS_ONLY_ATS or
+                any(sig in url_lower for sig in self._JS_ONLY_URL_SIGNALS)
+            )
+            if is_js_only and not getattr(career_page, "requires_js_rendering", False):
+                from sqlalchemy import text as _text
+                await self.db.execute(
+                    _text("UPDATE career_pages SET requires_js_rendering = true WHERE id = :id"),
+                    {"id": str(career_page.id)},
+                )
+                logger.info(f"Layer 0: set requires_js_rendering for JS-only ATS {career_page.url}")
+
+            await self._set_status(career_page, STATUS_OK)
+            logger.info(f"Layer 0: ATS shortcut → ok for {career_page.url}")
+            # Auto-enqueue for job_crawling
+            try:
+                from app.services import queue_manager
+                await queue_manager.enqueue(self.db, "job_crawling", career_page.id, added_by="ats_layer0")
+                await self.db.commit()
+            except Exception:
+                pass
+            return True
 
         # Fetch page HTML — use Playwright if requires_js flag is set
         requires_js = getattr(career_page, "requires_js_rendering", False)

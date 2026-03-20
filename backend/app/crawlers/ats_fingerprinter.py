@@ -76,6 +76,12 @@ ATS_SIGNATURES: list[dict] = [
         "confidence_base": 0.93,
     },
     {
+        "platform": "applynow",
+        "url_patterns": [r"applynow\.net\.au"],
+        "dom_patterns": [r"applynow", r"applyboard"],
+        "confidence_base": 0.88,
+    },
+    {
         "platform": "pageup",
         "url_patterns": [r"pageuppeople\.com"],
         "dom_patterns": [r"pageup", r"pageuppeople", r"pua-table"],

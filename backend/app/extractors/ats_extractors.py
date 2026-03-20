@@ -655,6 +655,79 @@ class PageUpExtractor(BaseATSExtractor):
         return jobs
 
 
+class ApplyNowExtractor(BaseATSExtractor):
+    """
+    ApplyNow ATS (applynow.net.au) — common in Australian recruitment.
+    Hosted boards at {company}.applynow.net.au/careers/opportunities/jobs
+    Tries JSON feed, falls back to HTML.
+    """
+
+    async def extract(self, url: str, html: str) -> list[dict]:
+        api_jobs = await self._extract_api(url)
+        if api_jobs:
+            return api_jobs
+        return self._extract_html(html, url)
+
+    async def _extract_api(self, url: str) -> list[dict]:
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        try:
+            async with httpx.AsyncClient(
+                headers={**self.headers, "Accept": "application/json"},
+                timeout=30, follow_redirects=True,
+            ) as client:
+                # Try the JSON API endpoint
+                resp = await client.get(f"{base}/careers/opportunities/jobs.json")
+                if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
+                    data = resp.json()
+                    items = data if isinstance(data, list) else data.get("jobs", data.get("items", []))
+                    if items:
+                        jobs = []
+                        for item in items:
+                            job_url = item.get("url") or item.get("link") or url
+                            if job_url and not job_url.startswith("http"):
+                                job_url = urljoin(base + "/careers/", job_url)
+                            jobs.append({
+                                "external_id": str(item.get("id") or item.get("ref", "")),
+                                "title": item.get("title") or item.get("position", ""),
+                                "location_raw": item.get("location") or item.get("suburb", ""),
+                                "employment_type": item.get("employment_type") or item.get("work_type", ""),
+                                "department": item.get("category") or item.get("department", ""),
+                                "source_url": job_url,
+                                "extraction_method": "ats_api",
+                                "extraction_confidence": 0.90,
+                                "raw_data": item,
+                            })
+                        return jobs
+        except Exception as e:
+            logger.warning(f"ApplyNow API failed for {url}: {e}")
+        return []
+
+    def _extract_html(self, html: str, base_url: str) -> list[dict]:
+        soup = BeautifulSoup(html, "lxml")
+        jobs = []
+        for row in soup.select(
+            ".job-listing, [class*='job-item'], [class*='opportunity-item'], "
+            "table.jobs tr[class], .positions li"
+        ):
+            link = row.find("a")
+            title_el = row.find(["h3", "h4", "h5", "strong"]) or link
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            if not title or len(title) < 4:
+                continue
+            loc_el = row.select_one("[class*='location'], [class*='suburb']")
+            jobs.append({
+                "title": title,
+                "source_url": urljoin(base_url, link.get("href", "")) if link else base_url,
+                "location_raw": loc_el.get_text(strip=True) if loc_el else None,
+                "extraction_method": "ats_html",
+                "extraction_confidence": 0.72,
+            })
+        return jobs
+
+
 REGISTRY: dict[str, type[BaseATSExtractor]] = {
     "greenhouse": GreenhouseExtractor,
     "lever": LeverExtractor,
@@ -665,4 +738,5 @@ REGISTRY: dict[str, type[BaseATSExtractor]] = {
     "jobvite": JobviteExtractor,
     "icims": ICIMSExtractor,
     "pageup": PageUpExtractor,
+    "applynow": ApplyNowExtractor,
 }
