@@ -76,6 +76,12 @@ ATS_SIGNATURES: list[dict] = [
         "confidence_base": 0.93,
     },
     {
+        "platform": "pageup",
+        "url_patterns": [r"pageuppeople\.com"],
+        "dom_patterns": [r"pageup", r"pageuppeople", r"pua-table"],
+        "confidence_base": 0.90,
+    },
+    {
         "platform": "jazzhr",
         "url_patterns": [r"jazzhr\.com", r"app\.jazz\.co"],
         "dom_patterns": [r'jazzhr', r'jazz-'],

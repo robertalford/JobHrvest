@@ -38,12 +38,31 @@ class SiteStructureExtractor:
         """
         logger.info(f"SiteStructureExtractor: starting for {career_page.url}")
 
-        # Fetch page HTML
-        html = await self._fetch_html(career_page.url)
+        # Fetch page HTML — use Playwright if requires_js flag is set
+        requires_js = getattr(career_page, "requires_js_rendering", False)
+        html = await self._fetch_html(career_page.url, requires_js=requires_js)
         if not html:
             await self._set_status(career_page, STATUS_NO_STRUCTURE_BROKEN
                                    if career_page.last_extraction_at else STATUS_NO_STRUCTURE_NEW)
             return False
+
+        # Auto-detect JS-heavy pages and re-fetch with Playwright if needed
+        if not requires_js and self._html_needs_js_rendering(html, career_page.url):
+            logger.info(f"JS rendering auto-detected for {career_page.url}, re-fetching with Playwright")
+            rendered = await self._fetch_html(career_page.url, requires_js=True)
+            if rendered and len(rendered) > len(html) + 500:
+                html = rendered
+                requires_js = True
+                # Persist flag so future crawls skip the plain fetch
+                try:
+                    from sqlalchemy import text as _text
+                    await self.db.execute(
+                        _text("UPDATE career_pages SET requires_js_rendering = true WHERE id = :id"),
+                        {"id": str(career_page.id)},
+                    )
+                    await self.db.commit()
+                except Exception:
+                    pass
 
         # Layer 1: Structured data (JSON-LD, Microdata, RDFa) via extruct
         if await self._layer_extruct(career_page, html):
@@ -87,17 +106,49 @@ class SiteStructureExtractor:
         logger.warning(f"SiteStructureExtractor: no structure found for {career_page.url} → {status}")
         return False
 
-    async def _fetch_html(self, url: str) -> str | None:
+    async def _fetch_html(self, url: str, requires_js: bool = False) -> str | None:
         try:
             from app.crawlers.http_client import ResilientHTTPClient
-            client = ResilientHTTPClient(timeout=20)
+            client = ResilientHTTPClient(timeout=25)
+            if requires_js:
+                return await client.get_rendered(url)
             resp = await client.get(url)
             if not resp:
                 return None
-            return resp.text if hasattr(resp, 'text') else resp.get('html', '')
+            return resp.text if hasattr(resp, "text") else resp.get("html", "")
         except Exception as e:
             logger.debug(f"Fetch failed for {url}: {e}")
             return None
+
+    @staticmethod
+    def _html_needs_js_rendering(html: str, url: str) -> bool:
+        """Detect JS-heavy / SPA pages that need Playwright for meaningful content."""
+        from urllib.parse import urlparse as _up
+        # Known ATS domains that always require JS
+        JS_DOMAINS = ["myworkdayjobs.com", "icims.com", "taleo.net", "ultipro.com",
+                      "successfactors.com", "oraclecloud.com"]
+        domain = _up(url).netloc.lower()
+        if any(d in domain for d in JS_DOMAINS):
+            return True
+        # Very sparse visible text relative to HTML size signals a SPA shell
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+            for tag in soup(["script", "style", "noscript", "head"]):
+                tag.decompose()
+            visible = soup.get_text(separator=" ", strip=True)
+            if len(html) > 5000 and len(visible) < 200:
+                return True
+            # SPA framework root markers
+            spa_markers = ["data-reactroot", "data-reactid", "__vue__", "data-v-app",
+                           "__nuxt__", "__next", "id=\"app\"", "id=\"root\"", "id=\"__next\"",
+                           "ng-app", "ng-version"]
+            html_lower = html.lower()
+            if sum(1 for m in spa_markers if m in html_lower) >= 2:
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _layer_extruct(self, career_page, html: str) -> bool:
         """Layer 1: Extract JSON-LD / Microdata / RDFa structured job data."""

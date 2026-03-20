@@ -53,6 +53,7 @@ ATS_URL_TEMPLATES = {
     "smartrecruiters": "https://careers.smartrecruiters.com/{slug}",
     "jobvite": "https://jobs.jobvite.com/{slug}",
     "workday": None,  # URL varies per company — discovered via heuristics
+    "pageup": "https://careers.pageuppeople.com/{slug}/external/",
 }
 
 # Common career subdomain prefixes to probe
