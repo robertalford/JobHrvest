@@ -328,6 +328,46 @@ class SiteStructureExtractor:
                 "job_listing_selector": selector,
                 "job_count_estimate": best_count,
             }
+
+            # Try to detect a location selector within the matched elements
+            _LOC_CANDIDATE_SELECTORS = (
+                "[class*='location']", "[class*='city']", "[class*='place']",
+                "[class*='job-location']", "[itemprop='jobLocation']",
+                "[itemprop='addressLocality']", "[data-testid*='location']",
+            )
+            try:
+                # Re-select elements using the winning selector
+                test_elements = soup.select(selector)[:8]
+                best_loc_sel = None
+                best_loc_hits = 0
+                for loc_sel in _LOC_CANDIDATE_SELECTORS:
+                    hits = sum(1 for el in test_elements if el.select_one(loc_sel))
+                    if hits > best_loc_hits:
+                        best_loc_hits = hits
+                        best_loc_sel = loc_sel
+                # Also check class-based selectors dynamically from the elements
+                if not best_loc_sel or best_loc_hits < len(test_elements) * 0.4:
+                    # Scan for common class patterns across elements
+                    from collections import Counter
+                    class_counter = Counter()
+                    for el in test_elements:
+                        for child in el.find_all(True):
+                            for cls in child.get("class", []):
+                                cls_lower = cls.lower()
+                                if any(kw in cls_lower for kw in ("loc", "city", "place", "region", "office")):
+                                    css = f".{cls}"
+                                    class_counter[css] += 1
+                    if class_counter:
+                        top_cls, top_count = class_counter.most_common(1)[0]
+                        if top_count >= len(test_elements) * 0.4:
+                            best_loc_sel = top_cls
+                            best_loc_hits = top_count
+                if best_loc_sel and best_loc_hits >= 2:
+                    selectors["location_selector"] = best_loc_sel
+                    logger.info(f"Detected location selector '{best_loc_sel}' ({best_loc_hits}/{len(test_elements)} hits)")
+            except Exception as e:
+                logger.debug(f"Location selector detection failed: {e}")
+
             await self._save_template(career_page, "repeating_block", selectors, accuracy=0.72)
             logger.info(f"Repeating block found {best_count} listings at {career_page.url}")
             return True

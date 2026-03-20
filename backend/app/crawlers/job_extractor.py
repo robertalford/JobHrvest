@@ -713,6 +713,28 @@ class JobExtractor:
                 elements = soup.select(selector)
                 if len(elements) < 2:
                     return []
+                import re
+                from urllib.parse import urlparse
+
+                # Location CSS selectors to try (shared with structural extractor)
+                _LOC_SELECTORS = (
+                    "[class*='location']", "[class*='city']", "[class*='place']",
+                    "[class*='job-location']", "[itemprop='jobLocation']",
+                    "[itemprop='addressLocality']", "[data-testid*='location']",
+                    "[class*='department']", ".sort-by-location", ".jv-job-list-location",
+                )
+                # Location text patterns for subtitle scanning
+                _LOC_PATTERN = re.compile(
+                    r'\b(?:NSW|VIC|QLD|WA|SA|ACT|NT|TAS|Australia|Remote|Hybrid|On-site)\b|'
+                    r'\b(?:Sydney|Melbourne|Brisbane|Perth|Adelaide|Canberra|Darwin|Hobart|'
+                    r'Auckland|Wellington|London|New York|Toronto|Singapore|Dubai|Tokyo|'
+                    r'Hong Kong|Berlin|Paris|Amsterdam|Dublin|Munich|Zurich|Geneva)\b',
+                    re.IGNORECASE,
+                )
+
+                # Also check if template has a saved location_selector
+                tmpl_loc_selector = selectors.get("location_selector", "")
+
                 jobs = []
                 for el in elements:
                     link = el.find("a")
@@ -721,9 +743,75 @@ class JobExtractor:
                     if not title or len(title) < 5:
                         continue
                     job_url = urljoin(career_page.url, link["href"]) if link and link.get("href") else career_page.url
+
+                    # --- Location extraction ---
+                    loc_raw = None
+
+                    # 1. Try saved location selector from template
+                    if tmpl_loc_selector:
+                        try:
+                            loc_el = el.select_one(tmpl_loc_selector)
+                            if loc_el:
+                                txt = loc_el.get_text(strip=True)
+                                if txt and 2 < len(txt) < 120:
+                                    loc_raw = txt
+                        except Exception:
+                            pass
+
+                    # 2. Try CSS class-based selectors
+                    if not loc_raw:
+                        for loc_sel in _LOC_SELECTORS:
+                            loc_el = el.select_one(loc_sel)
+                            if loc_el:
+                                txt = loc_el.get_text(strip=True)
+                                if txt and 2 < len(txt) < 120:
+                                    loc_raw = txt
+                                    break
+
+                    # 3. Try data-* attributes containing 'location'
+                    if not loc_raw:
+                        for desc_el in el.find_all(True):
+                            for attr_name, attr_val in desc_el.attrs.items():
+                                if attr_name.startswith('data-') and 'location' in attr_name.lower():
+                                    if isinstance(attr_val, str) and 2 < len(attr_val) < 120:
+                                        loc_raw = attr_val
+                                        break
+                            if loc_raw:
+                                break
+
+                    # 4. Check subtitle/secondary text for location patterns
+                    if not loc_raw:
+                        subtitles = el.find_all(["p", "span", "div"], recursive=False)
+                        for sub in subtitles[1:4]:
+                            txt = sub.get_text(strip=True)
+                            if txt and txt != title and 2 < len(txt) < 80:
+                                if _LOC_PATTERN.search(txt):
+                                    loc_raw = txt
+                                    break
+
+                    # 5. Scan all text in block for location patterns (fallback)
+                    if not loc_raw:
+                        all_spans = el.find_all(["span", "small", "em", "dd"])
+                        for sp in all_spans:
+                            txt = sp.get_text(strip=True)
+                            if txt and txt != title and 2 < len(txt) < 80:
+                                if _LOC_PATTERN.search(txt):
+                                    loc_raw = txt
+                                    break
+
+                    # 6. URL path pattern fallback
+                    if not loc_raw:
+                        url_path = urlparse(job_url).path
+                        m = re.search(r'/jobs?/([a-zA-Z][a-zA-Z\s\-]{2,30})/[^/]+(?:/|$)', url_path)
+                        if m:
+                            candidate = m.group(1).replace("-", " ").strip().title()
+                            if candidate.lower() not in ("all", "search", "view", "apply", "new", "list", "category"):
+                                loc_raw = candidate
+
                     jobs.append({
                         "title": title,
                         "source_url": job_url,
+                        "location_raw": loc_raw,
                         "extraction_method": f"template_{tmpl_type}",
                         "extraction_confidence": float(template.accuracy_score or 0.7),
                     })
@@ -911,7 +999,9 @@ class JobExtractor:
             for loc_sel in (
                 "[class*='location']", "[class*='city']", "[class*='place']",
                 "[class*='job-location']", "[itemprop='jobLocation']",
-                "[data-testid*='location']", ".sort-by-location", ".jv-job-list-location",
+                "[itemprop='addressLocality']", "[itemprop='addressRegion']",
+                "[data-testid*='location']", "[data-field='location']",
+                ".sort-by-location", ".jv-job-list-location",
             ):
                 loc_el = el.select_one(loc_sel)
                 if loc_el:
@@ -920,18 +1010,61 @@ class JobExtractor:
                         loc_raw = txt
                         break
 
+            # Try data-* attributes containing 'location'
+            if not loc_raw:
+                for desc_el in el.find_all(True):
+                    for attr_name, attr_val in desc_el.attrs.items():
+                        if attr_name.startswith('data-') and 'location' in attr_name.lower():
+                            if isinstance(attr_val, str) and 2 < len(attr_val) < 120:
+                                loc_raw = attr_val
+                                break
+                    if loc_raw:
+                        break
+
+            # Broad location text pattern for subtitle and fallback scanning
+            _struct_loc_pattern = re.compile(
+                r'\b(?:NSW|VIC|QLD|WA|SA|ACT|NT|TAS|Australia|Remote|Hybrid|On-site)\b|'
+                r'\b(?:Sydney|Melbourne|Brisbane|Perth|Adelaide|Canberra|Darwin|Hobart|'
+                r'Gold Coast|Townsville|Cairns|Geelong|Newcastle|Wollongong|Ballarat|'
+                r'Auckland|Wellington|Christchurch|London|Manchester|Birmingham|Edinburgh|'
+                r'New York|Los Angeles|Chicago|San Francisco|Seattle|Boston|Austin|Denver|'
+                r'Toronto|Vancouver|Montreal|Singapore|Dubai|Tokyo|Hong Kong|Berlin|Paris|'
+                r'Amsterdam|Dublin|Munich|Zurich|Geneva|Stockholm|Copenhagen|Oslo)\b',
+                re.IGNORECASE,
+            )
+
             # Also try second line / subtitle of the card (many sites list location there)
             if not loc_raw:
                 subtitles = el.find_all(["p", "span", "div"], recursive=False)
-                for sub in subtitles[1:3]:  # skip first (usually the title)
+                for sub in subtitles[1:4]:  # skip first (usually the title), check a few more
                     txt = sub.get_text(strip=True)
                     if txt and txt != title and 2 < len(txt) < 80:
-                        # Check if it looks like a location (has state abbr, city, or remote)
-                        if re.search(r'\b(?:NSW|VIC|QLD|WA|SA|ACT|NT|TAS|Australia|Remote|Hybrid)\b|'
-                                     r'\b(?:Sydney|Melbourne|Brisbane|Perth|Adelaide|Canberra|Darwin|Hobart)\b',
-                                     txt, re.IGNORECASE):
+                        if _struct_loc_pattern.search(txt):
                             loc_raw = txt
                             break
+
+            # Scan deeper: any span/small/dd/em within the block
+            if not loc_raw:
+                for sp in el.find_all(["span", "small", "em", "dd", "li"]):
+                    txt = sp.get_text(strip=True)
+                    if txt and txt != title and 2 < len(txt) < 80:
+                        if _struct_loc_pattern.search(txt):
+                            loc_raw = txt
+                            break
+
+            # Fallback: scan the full block text for "City, State" patterns
+            if not loc_raw:
+                block_text = el.get_text(separator=" | ", strip=True)
+                # Match "City, ST" or "City, State" or "City, Country" patterns
+                m_loc = re.search(
+                    r'(?:^|[|,;])\s*([A-Z][a-z]+(?:\s[A-Z][a-z]+)?,\s*'
+                    r'(?:NSW|VIC|QLD|WA|SA|ACT|NT|TAS|'
+                    r'Australia|UK|USA|US|Canada|NZ|New Zealand|Ireland|Germany|France|'
+                    r'Singapore|Japan|India|UAE|Netherlands|Sweden|Denmark|Norway|Switzerland))',
+                    block_text,
+                )
+                if m_loc:
+                    loc_raw = m_loc.group(1).strip()
 
             # Fallback: extract city from URL path pattern /job/{city}/ or /{city}/jobs/
             if not loc_raw:

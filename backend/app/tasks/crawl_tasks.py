@@ -911,7 +911,7 @@ def populate_queues():
                         SELECT 1 FROM career_pages cp2
                         WHERE cp2.company_id = cp.company_id AND cp2.site_status = 'ok'
                           AND cp2.is_active = true AND cp2.id != cp.id
-                    ) THEN 8 ELSE 1 END,
+                    ) THEN 2 ELSE 10 END,
                     'scheduled_populate'
                 FROM career_pages cp
                 WHERE cp.is_active = true AND cp.site_status != 'ok'
