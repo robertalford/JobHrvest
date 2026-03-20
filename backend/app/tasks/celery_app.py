@@ -32,10 +32,10 @@ celery_app.conf.update(
         "crawl.seed_market_companies": {"queue": "default"},
         "crawl.mark_inactive_jobs": {"queue": "default"},
         "crawl.validate_page_template": {"queue": "default"},
-        "crawl.fix_company_sites": {"queue": "crawl"},
+        "crawl.fix_company_sites": {"queue": "company_config"},
         "crawl.fix_site_structure": {"queue": "crawl"},
         # Queue drain tasks
-        "queue.drain_company_config": {"queue": "crawl"},
+        "queue.drain_company_config": {"queue": "company_config"},
         "queue.drain_site_config": {"queue": "crawl"},
         "queue.drain_job_crawling": {"queue": "crawl"},
         "queue.drain_discovery": {"queue": "discovery"},
@@ -66,7 +66,7 @@ celery_app.conf.update(
         # site_config is one-time per site — moderate drain rate is fine
         "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 10},
         # company_config is one-time per company — infrequent, no rush
-        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 10},
+        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 60},
         # discovery sources
         "drain-discovery":       {"task": "queue.drain_discovery",       "schedule": 60},
         # Populate queues every 2h (safety net — hooks handle real-time adds)

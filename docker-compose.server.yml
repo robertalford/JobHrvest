@@ -106,6 +106,7 @@ services:
         condition: service_healthy
     command: >
       sh -c "alembic upgrade head &&
+             python scripts/ensure_auth.py &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
@@ -270,6 +271,29 @@ services:
       redis:
         condition: service_healthy
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_ML_CONCURRENCY:-8} -Q ml,default --prefetch-multiplier=1 --hostname=worker-ml@%h
+
+  # Dedicated company_config worker — handles company discovery separately from job crawling
+  celery-worker-company:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-company
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=8 -Q company_config,default --prefetch-multiplier=1 --hostname=worker-company@%h
 
   celery-beat:
     build:
