@@ -5,6 +5,18 @@ services:
     image: postgres:16-alpine
     container_name: jobharvest-postgres
     restart: unless-stopped
+    # Tuned for SSD-backed Docker storage: lower random_page_cost encourages
+    # index scans over seq scans, which are critical for ORDER BY + LIMIT queries.
+    command: >
+      postgres
+        -c random_page_cost=1.1
+        -c seq_page_cost=1.0
+        -c effective_cache_size=512MB
+        -c shared_buffers=512MB
+        -c work_mem=4MB
+        -c effective_io_concurrency=200
+        -c idle_in_transaction_session_timeout=30000
+        -c max_connections=300
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jobharvest}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobharvest}
@@ -38,6 +50,10 @@ services:
     image: ollama/ollama:latest
     container_name: jobharvest-ollama
     restart: unless-stopped
+    environment:
+      # 8GB RAM + 4GB swap. One model loaded at a time — swaps when tier escalates.
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
     volumes:
       - ollama_data:/root/.ollama
     ports:
@@ -88,6 +104,7 @@ services:
       retries: 3
       start_period: 20s
 
+  # Worker 1 — crawl & discovery tasks (highest concurrency for I/O-bound work)
   celery-worker:
     build:
       context: ./backend
@@ -99,6 +116,7 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
       - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
     volumes:
       - ./backend:/app
       - ./storage:/storage
@@ -107,7 +125,122 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4}
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-32} -Q crawl,discovery,default,celery --prefetch-multiplier=1 --hostname=worker1@%h
+
+  # Worker 2 — additional crawl worker (parallel throughput)
+  celery-worker-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-2
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-32} -Q crawl,discovery,default,celery --prefetch-multiplier=1 --hostname=worker2@%h
+
+  # Worker 3 — additional crawl worker (extra parallel throughput)
+  celery-worker-3:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-3
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-32} -Q crawl,discovery,default,celery --prefetch-multiplier=1 --hostname=worker3@%h
+
+  # Worker 4 — dedicated crawl queue (pure job-crawling throughput)
+  celery-worker-4:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-4
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-32} -Q crawl --prefetch-multiplier=1 --hostname=worker4@%h
+
+  # Worker 5 — dedicated crawl queue (pure job-crawling throughput)
+  celery-worker-5:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-5
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-32} -Q crawl --prefetch-multiplier=1 --hostname=worker5@%h
+
+  # Worker 4 — ML & analytics tasks (LLM-aware, controlled concurrency)
+  celery-worker-ml:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobharvest-celery-worker-ml
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_ML_CONCURRENCY:-6} -Q ml,default --prefetch-multiplier=1 --hostname=worker-ml@%h
 
   celery-beat:
     build:
@@ -120,6 +253,7 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
       - OLLAMA_HOST=ollama
+      - CELERY_WORKER=true
     volumes:
       - ./backend:/app
     depends_on:
@@ -134,18 +268,22 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: jobharvest-frontend
     restart: unless-stopped
+    volumes:
+      - ./frontend:/app                 # live source mount — HMR picks up all changes
+      - frontend_node_modules:/app/node_modules  # keep node_modules in a named volume
     ports:
-      - "3001:80"
+      - "5173:5173"
     depends_on:
       - api
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # ─── Reverse Proxy ────────────────────────────────────────────────────────
 
@@ -170,3 +308,4 @@ volumes:
   ollama_data:
   caddy_data:
   caddy_config:
+  frontend_node_modules:

@@ -57,6 +57,33 @@ def crawl_company(self, company_id: str):
                 # Stage 2: Career page discovery
                 discoverer = CareerPageDiscoverer(db)
                 career_pages = await discoverer.discover(company)
+
+                # Fallback: if discovery found nothing, check DB for existing pages
+                # (company may already have pages from a prior crawl or seed data)
+                if not career_pages:
+                    from sqlalchemy import select as sa_select
+                    from app.models.career_page import CareerPage
+                    existing = list(await db.scalars(
+                        sa_select(CareerPage).where(
+                            CareerPage.company_id == company.id,
+                            CareerPage.is_active == True,
+                        )
+                    ))
+                    if existing:
+                        career_pages = existing
+                        logger.info(f"Using {len(existing)} existing career pages for {company.domain}")
+                    else:
+                        # Last resort: treat company root URL as the career page
+                        # (handles cases where domain IS the careers site, e.g. careers.company.com)
+                        fallback = await discoverer._upsert_career_page(company, company.root_url, {
+                            "discovery_method": "root_fallback",
+                            "confidence": 0.4,
+                            "is_primary": True,
+                            "page_type": "listing_page",
+                        })
+                        career_pages = [fallback]
+                        logger.info(f"Root URL fallback for {company.domain}: {company.root_url}")
+
                 log.pages_crawled = len(career_pages)
 
                 # Stage 3+4: Job extraction for each page
@@ -71,7 +98,94 @@ def crawl_company(self, company_id: str):
 
                 # Update schedule: next crawl based on frequency
                 company.last_crawl_at = datetime.now(timezone.utc)
-                company.next_crawl_at = datetime.now(timezone.utc) + timedelta(hours=company.crawl_frequency_hours)
+                company.next_crawl_at = datetime.now(timezone.utc) + timedelta(hours=company.crawl_frequency_hours or 24)
+
+                # Run deduplication after extraction
+                if total_jobs > 0:
+                    from app.services.job_deduplicator import run_company_dedup
+                    await run_company_dedup(db, company.id)
+
+                # Score new jobs immediately after extraction + dedup
+                if total_jobs > 0:
+                    from app.services.quality_scorer import score_job, compute_site_quality
+                    from sqlalchemy import select as sa_select, or_ as sa_or
+                    from app.models.job import Job
+
+                    unscored = list(await db.scalars(
+                        sa_select(Job).where(
+                            Job.company_id == company.id,
+                            sa_or(Job.quality_score.is_(None), Job.quality_scored_at.is_(None)),
+                        )
+                    ))
+                    job_scores = []
+                    has_scam = False
+                    has_disc = False
+                    for j in unscored:
+                        qr = score_job(
+                            title=j.title, description=j.description,
+                            location_raw=j.location_raw, employment_type=j.employment_type,
+                            date_posted=j.date_posted, salary_raw=j.salary_raw,
+                            requirements=j.requirements,
+                        )
+                        j.quality_score = qr.score
+                        j.quality_completeness = qr.completeness_score
+                        j.quality_description = qr.description_score
+                        j.quality_issues = qr.issues
+                        j.quality_flags = {
+                            "scam_detected": qr.scam_detected,
+                            "bad_words_detected": qr.bad_words_detected,
+                            "discrimination_detected": qr.discrimination_detected,
+                        }
+                        j.quality_scored_at = datetime.now(timezone.utc)
+                        job_scores.append(qr.score)
+                        if qr.scam_detected:
+                            has_scam = True
+                        if qr.discrimination_detected:
+                            has_disc = True
+
+                    if job_scores:
+                        company.quality_score = compute_site_quality(job_scores, has_scam, has_disc)
+                        company.quality_scored_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    logger.info(f"Scored {len(unscored)} jobs for {company.domain}")
+
+                # Geocode new jobs inline (best-effort; beat task catches any misses)
+                if total_jobs > 0:
+                    try:
+                        from app.services.geocoder import geocoder_service
+                        from sqlalchemy import select as sa_select2
+                        from app.models.job import Job as JobModel
+
+                        ungeo = list(await db.scalars(
+                            sa_select2(JobModel).where(
+                                JobModel.company_id == company.id,
+                                JobModel.geo_resolved.is_(None),
+                            )
+                        ))
+                        for j in ungeo:
+                            loc_text = (j.location_raw or j.location_city or "").strip()
+                            if loc_text:
+                                geo = await geocoder_service.geocode(
+                                    db, loc_text, company.market_code or "AU"
+                                )
+                                if geo:
+                                    j.geo_location_id = uuid.UUID(geo.geo_location_id)
+                                    j.geo_level = geo.level
+                                    j.geo_confidence = geo.confidence
+                                    j.geo_resolution_method = geo.method
+                                    j.geo_resolved = True
+                                else:
+                                    j.geo_resolved = False
+                                    j.geo_resolution_method = "unresolvable"
+                            else:
+                                j.geo_resolved = False
+                                j.geo_resolution_method = "no_location"
+                        if ungeo:
+                            await db.commit()
+                            resolved = sum(1 for j in ungeo if j.geo_resolved)
+                            logger.info(f"Geocoded {resolved}/{len(ungeo)} jobs for {company.domain}")
+                    except Exception as geo_exc:
+                        logger.warning(f"Geocoding failed for {company.domain}: {geo_exc}")
 
                 log.status = "success"
                 log.completed_at = datetime.now(timezone.utc)
@@ -124,22 +238,33 @@ def full_crawl_cycle():
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.models.company import Company
+        from app.models.excluded_site import ExcludedSite
+        from app.crawlers.domain_blocklist import refresh_from_db_async
         from sqlalchemy import select
 
+        # Refresh blocklist from DB before scheduling so newly added exclusions take effect
+        await refresh_from_db_async()
+
         async with AsyncSessionLocal() as db:
+            # Exclude companies whose domain appears in excluded_sites
+            excluded_domains_sq = select(ExcludedSite.domain)
             due_companies = await db.scalars(
                 select(Company).where(
                     Company.is_active == True,
                     (Company.next_crawl_at <= datetime.now(timezone.utc)) | (Company.next_crawl_at.is_(None)),
+                    ~Company.domain.in_(excluded_domains_sq),
                 ).order_by(Company.crawl_priority.asc())
             )
             count = 0
             for company in due_companies:
-                crawl_company.apply_async(args=[str(company.id)], countdown=count * 2)
+                # No countdown — queue all immediately, let worker concurrency + per-domain
+                # rate limiting in the HTTP client control actual throughput.
+                crawl_company.apply_async(args=[str(company.id)])
                 count += 1
             logger.info(f"Queued crawls for {count} companies")
+            return count
 
-    _run_async(_run())
+    return _run_async(_run())
 
 
 @celery_app.task(name="crawl.scheduled")
@@ -149,32 +274,69 @@ def scheduled_crawl_cycle():
 
 
 @celery_app.task(bind=True, name="crawl.harvest_aggregators")
-def harvest_aggregators(self, queries: list[str] = None):
+def harvest_aggregators(self, market_code: str = "AU", queries: list[str] = None):
     """
-    Harvest company links from permitted aggregator sites (Indeed AU first).
-    This task discovers new companies by following aggregator outbound links.
+    Harvest company links from aggregator sites for the given market.
+    Uses market configuration to determine queries and aggregator sources.
     """
 
     async def _run():
         from app.db.base import AsyncSessionLocal
-        from app.crawlers.aggregator_harvester import IndeedAUHarvester
+        from app.crawlers.aggregator_harvester import IndeedAUHarvester, LinkedInHarvester
+        from app.core.markets import get_market
+        from app.models.crawl_log import CrawlLog
 
-        default_queries = [
-            "software engineer", "data analyst", "project manager",
-            "marketing manager", "finance", "operations", "sales",
-            "engineer", "developer", "designer",
-        ]
-        search_queries = queries or default_queries
+        market = get_market(market_code)
+        if not market or not market.is_active:
+            logger.info(f"Market {market_code} not active, skipping harvest")
+            return
 
         async with AsyncSessionLocal() as db:
-            harvester = IndeedAUHarvester()
-            total_discovered = 0
-            for query in search_queries:
-                discovered = await harvester.harvest(db, query=query, max_pages=3)
-                total_discovered += len(discovered)
-                logger.info(f"Indeed AU harvest '{query}': {len(discovered)} companies discovered")
+            log = CrawlLog(
+                crawl_type="discovery",
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(log)
+            await db.commit()
 
-            logger.info(f"Aggregator harvest complete: {total_discovered} total discoveries")
+            started_at = datetime.now(timezone.utc)
+            total_discovered = 0
+
+            for agg_config in market.aggregators:
+                if not agg_config.enabled:
+                    continue
+
+                # Route to the correct harvester class
+                if "indeed" in agg_config.name.lower():
+                    harvester = IndeedAUHarvester()
+                    search_queries = queries or agg_config.search_queries
+                    for query in search_queries:
+                        discovered = await harvester.harvest(
+                            db, query=query,
+                            location=agg_config.location_param,
+                            max_pages=agg_config.max_pages_per_query,
+                        )
+                        total_discovered += len(discovered)
+                        logger.info(f"{agg_config.name} '{query}': {len(discovered)} companies")
+
+                elif "linkedin" in agg_config.name.lower():
+                    harvester = LinkedInHarvester()
+                    search_queries = queries or agg_config.search_queries
+                    for query in search_queries:
+                        discovered = await harvester.harvest(
+                            db, query=query,
+                            max_pages=agg_config.max_pages_per_query,
+                        )
+                        total_discovered += len(discovered)
+                        logger.info(f"{agg_config.name} '{query}': {len(discovered)} companies")
+
+            log.status = "success"
+            log.jobs_found = total_discovered
+            log.completed_at = datetime.now(timezone.utc)
+            log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+            await db.commit()
+            logger.info(f"Aggregator harvest complete ({market_code}): {total_discovered} discoveries")
 
     _run_async(_run())
 
@@ -239,6 +401,443 @@ def validate_page_template(career_page_id: str):
     _run_async(_run())
 
 
+@celery_app.task(name="crawl.seed_market_companies")
+def seed_market_companies(market_code: str = "AU"):
+    """
+    Seed initial companies from a market's seed_domains list.
+    Safe to run multiple times — idempotent upsert.
+    """
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.company import Company
+        from app.core.markets import get_market
+        from sqlalchemy import select
+
+        market = get_market(market_code)
+        if not market:
+            logger.error(f"Unknown market code: {market_code}")
+            return
+
+        added = 0
+        async with AsyncSessionLocal() as db:
+            for domain in market.seed_domains:
+                domain = domain.lstrip("www.").lower()
+                existing = await db.scalar(select(Company).where(Company.domain == domain))
+                if existing:
+                    continue
+                company = Company(
+                    name=domain.split(".")[0].capitalize(),
+                    domain=domain,
+                    root_url=f"https://{domain}",
+                    market_code=market.code,
+                    discovered_via="seed",
+                    crawl_priority=5,  # Medium priority
+                )
+                db.add(company)
+                added += 1
+
+            await db.commit()
+            logger.info(f"Seeded {added} companies for market {market_code}")
+
+    _run_async(_run())
+
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=60, name="crawl.fix_company_sites")
+def fix_company_sites(self, company_id: str, queue_item_id: str = None):
+    """Run CompanySiteExtractor for a single company to find/fix career page URLs."""
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.company import Company
+        from app.models.crawl_log import CrawlLog
+        from app.services.company_site_extractor import CompanySiteExtractor
+        from app.services import queue_manager
+
+        async with AsyncSessionLocal() as db:
+            company = await db.get(Company, uuid.UUID(company_id))
+            if not company or not company.is_active:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+
+            # Clean up zombie running logs from previously crashed runs
+            from sqlalchemy import text as sa_text
+            await db.execute(sa_text("""
+                UPDATE crawl_logs SET status='failed',
+                    error_message='zombie: task restarted before previous run completed',
+                    completed_at=NOW()
+                WHERE company_id=:cid AND status='running'
+                  AND started_at < NOW() - INTERVAL '2 hours'
+            """), {"cid": str(company.id)})
+            await db.commit()
+
+            log = CrawlLog(
+                company_id=company.id,
+                crawl_type="company_config",
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(log)
+            await db.commit()
+
+            started_at = datetime.now(timezone.utc)
+            try:
+                extractor = CompanySiteExtractor(db)
+                pages = await extractor.extract(company)
+
+                # CASCADE: enqueue each discovered career page into site_config
+                for page in pages:
+                    await queue_manager.enqueue(
+                        db, "site_config", page.id,
+                        priority=company.crawl_priority or 5,
+                        added_by="company_config_cascade",
+                    )
+
+                log.status = "success"
+                log.pages_crawled = len(pages)
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                logger.info(f"fix_company_sites complete for {company.domain}: {len(pages)} pages → queued {len(pages)} for site_config")
+            except Exception as e:
+                logger.error(f"fix_company_sites failed for {company_id}: {e}", exc_info=True)
+                log.status = "failed"
+                log.error_message = str(e)[:500]
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                if queue_item_id:
+                    await queue_manager.fail(db, uuid.UUID(queue_item_id), str(e))
+                await db.commit()
+                raise self.retry(exc=e)
+
+    _run_async(_run())
+
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=60, name="crawl.fix_site_structure")
+def fix_site_structure(self, career_page_id: str, queue_item_id: str = None):
+    """Run SiteStructureExtractor for a single career page to map job listing structure."""
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.career_page import CareerPage
+        from app.models.company import Company
+        from app.models.crawl_log import CrawlLog
+        from app.services.site_structure_extractor import SiteStructureExtractor
+        from app.services import queue_manager
+
+        async with AsyncSessionLocal() as db:
+            page = await db.get(CareerPage, uuid.UUID(career_page_id))
+            if not page or not page.is_active:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+            company = await db.get(Company, page.company_id)
+            if not company:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+
+            # Clean up zombie running logs from previously crashed runs
+            from sqlalchemy import text as sa_text
+            await db.execute(sa_text("""
+                UPDATE crawl_logs SET status='failed',
+                    error_message='zombie: task restarted before previous run completed',
+                    completed_at=NOW()
+                WHERE company_id=:cid AND crawl_type='site_config' AND status='running'
+                  AND started_at < NOW() - INTERVAL '2 hours'
+            """), {"cid": str(company.id)})
+            await db.commit()
+
+            log = CrawlLog(
+                company_id=company.id,
+                crawl_type="site_config",
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(log)
+            await db.commit()
+
+            started_at = datetime.now(timezone.utc)
+            try:
+                extractor = SiteStructureExtractor(db)
+                success = await extractor.extract(page)
+
+                # CASCADE: enqueue career page into job_crawling regardless of structure success
+                # (job extractor uses fallback methods when structure mapping fails)
+                await queue_manager.enqueue(
+                    db, "job_crawling", page.id,
+                    priority=company.crawl_priority or 5,
+                    added_by="site_config_cascade",
+                )
+
+                log.status = "success"
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                logger.info(f"fix_site_structure complete for {page.url}: mapped={success} → queued for job_crawling")
+            except Exception as e:
+                logger.error(f"fix_site_structure failed for {career_page_id}: {e}", exc_info=True)
+                log.status = "failed"
+                log.error_message = str(e)[:500]
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                if queue_item_id:
+                    await queue_manager.fail(db, uuid.UUID(queue_item_id), str(e))
+                await db.commit()
+                raise self.retry(exc=e)
+
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_company_config")
+def drain_company_config():
+    """Drain company_config queue: claim batch and run CompanySiteExtractor for each."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=50)
+            await db.commit()
+            for row in items:
+                queue_item_id, company_id = row[0], row[1]
+                if company_id:
+                    fix_company_sites.apply_async(args=[str(company_id), str(queue_item_id)])
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_site_config")
+def drain_site_config():
+    """Drain site_config queue: claim batch and run SiteStructureExtractor for each."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "site_config", batch_size=50)
+            await db.commit()
+            for row in items:
+                queue_item_id, page_id = row[0], row[1]
+                if page_id:
+                    fix_site_structure.apply_async(args=[str(page_id), str(queue_item_id)])
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_job_crawling")
+def drain_job_crawling():
+    """Drain job_crawling queue: claim batch and send to Celery.
+
+    Runs every 5 seconds (beat) with batch_size=250.
+    At 160 workers × 5s/page = 32 pages/s throughput → 50k sites in ~26 min.
+    """
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "job_crawling", batch_size=250)
+            await db.commit()
+            for row in items:
+                queue_item_id, page_id = row[0], row[1]
+                if page_id:
+                    crawl_career_page_from_queue.apply_async(
+                        args=[str(page_id), str(queue_item_id)],
+                        queue="crawl",
+                    )
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_discovery")
+def drain_discovery():
+    """Drain discovery queue: claim batch and run aggregator harvest for each source."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "discovery", batch_size=5)
+            await db.commit()
+            for row in items:
+                queue_item_id, source_id = row[0], row[1]
+                if source_id:
+                    harvest_aggregator_source.apply_async(args=[str(source_id), str(queue_item_id)])
+    _run_async(_run())
+
+
+@celery_app.task(bind=True, max_retries=2, name="queue.crawl_career_page_from_queue")
+def crawl_career_page_from_queue(self, career_page_id: str, queue_item_id: str):
+    """Crawl a career page (from job_crawling queue)."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.career_page import CareerPage
+        from app.models.company import Company
+        from app.crawlers.job_extractor import JobExtractor
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            page = await db.get(CareerPage, uuid.UUID(career_page_id))
+            if not page or not page.is_active:
+                await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                return
+            company = await db.get(Company, page.company_id)
+            if not company:
+                await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                return
+            try:
+                extractor = JobExtractor(db)
+                await extractor.extract(company, page)
+                await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+            except Exception as e:
+                await queue_manager.fail(db, uuid.UUID(queue_item_id), str(e))
+                await db.commit()
+                raise self.retry(exc=e)
+    _run_async(_run())
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    name="queue.harvest_aggregator_source",
+    soft_time_limit=600,   # 10 min soft limit — raises SoftTimeLimitExceeded
+    time_limit=660,        # 11 min hard kill
+)
+def harvest_aggregator_source(self, source_id: str, queue_item_id: str):
+    """Harvest one aggregator source using the appropriate harvester class.
+    Uses Playwright for JS-heavy sites; curl_cffi for static sites.
+    Blank search + exhaustive pagination to maximise company discovery.
+    Companies/sites are unique by domain/URL — ON CONFLICT DO NOTHING."""
+    from billiard.exceptions import SoftTimeLimitExceeded
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.aggregator_source import AggregatorSource
+        from app.crawlers.aggregator_harvester import get_harvester_for_source
+        from app.services import queue_manager
+        from app.models.crawl_log import CrawlLog
+        async with AsyncSessionLocal() as db:
+            source = await db.get(AggregatorSource, uuid.UUID(source_id))
+            if not source or not source.is_active:
+                await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                return
+
+            log = CrawlLog(crawl_type="discovery", status="running",
+                           started_at=datetime.now(timezone.utc))
+            db.add(log)
+            await db.commit()
+
+            started_at = datetime.now(timezone.utc)
+            err_msg = None
+            try:
+                harvester = get_harvester_for_source(source.name)
+                if harvester is None:
+                    logger.warning(f"No harvester registered for source: {source.name!r}")
+                    err_msg = f"No harvester for: {source.name}"
+                    log.status = "failed"
+                    log.error_message = err_msg
+                    log.completed_at = datetime.now(timezone.utc)
+                    log.duration_seconds = 0
+                    await queue_manager.fail(db, uuid.UUID(queue_item_id), err_msg)
+                    await db.commit()
+                    return
+
+                discovered = await harvester.harvest(db)
+                total = len(discovered)
+
+                log.status = "success"
+                log.jobs_found = total
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                # Re-add to queue for next cycle
+                await queue_manager.enqueue(db, "discovery", uuid.UUID(source_id), added_by="auto_requeue")
+                await db.commit()
+                logger.info(f"Harvested {total} new companies from {source.name}")
+            except (Exception, SoftTimeLimitExceeded) as e:
+                err_msg = f"timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)[:500]
+                logger.error(f"harvest_aggregator_source failed for {source_id}: {err_msg}")
+                try:
+                    log.status = "failed"
+                    log.error_message = err_msg
+                    log.completed_at = datetime.now(timezone.utc)
+                    log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                    await queue_manager.fail(db, uuid.UUID(queue_item_id), err_msg)
+                    await db.commit()
+                except Exception:
+                    pass
+                raise e
+
+    try:
+        _run_async(_run())
+    except SoftTimeLimitExceeded:
+        logger.error(f"harvest_aggregator_source timed out: source={source_id} item={queue_item_id}")
+    except Exception as e:
+        raise self.retry(exc=e)
+
+
+@celery_app.task(name="queue.reset_stale_processing")
+def reset_stale_processing():
+    """Reset run_queue items stuck in 'processing' > 2 hours back to 'pending'.
+    Runs every 30 min as a safety net for tasks that died without completing."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            count = await queue_manager.reset_stale_processing(db, stale_after_minutes=120)
+            await db.commit()
+            if count:
+                logger.warning(f"reset_stale_processing: reset {count} stuck items → pending")
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.populate_queues")
+def populate_queues():
+    """Populate all 4 queues with items that should be processed.
+    Run every 2h as a safety net — auto-enqueue hooks handle real-time adds."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        from app.models.company import Company
+        from app.models.career_page import CareerPage
+        from app.models.aggregator_source import AggregatorSource
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as db:
+            # company_config: non-ok companies
+            companies = await db.scalars(
+                select(Company).where(Company.is_active == True, Company.company_status != 'ok')
+            )
+            for c in companies:
+                await queue_manager.enqueue(db, "company_config", c.id, added_by="scheduled_populate")
+            # site_config: non-ok sites
+            pages = await db.scalars(
+                select(CareerPage).where(CareerPage.is_active == True, CareerPage.site_status != 'ok')
+            )
+            for p in pages:
+                await queue_manager.enqueue(db, "site_config", p.id, added_by="scheduled_populate")
+            # job_crawling: all active sites
+            due_pages = await db.scalars(
+                select(CareerPage).where(CareerPage.is_active == True)
+            )
+            for p in due_pages:
+                await queue_manager.enqueue(db, "job_crawling", p.id, added_by="scheduled_populate")
+            # discovery: all active sources
+            sources = await db.scalars(
+                select(AggregatorSource).where(AggregatorSource.is_active == True)
+            )
+            for s in sources:
+                await queue_manager.enqueue(db, "discovery", s.id, added_by="scheduled_populate")
+            await db.commit()
+            logger.info("Queue population complete")
+    _run_async(_run())
+
+
 @celery_app.task(name="crawl.mark_inactive_jobs")
 def mark_inactive_jobs():
     """
@@ -264,5 +863,127 @@ def mark_inactive_jobs():
             await db.commit()
             if removed:
                 logger.info(f"Marked {removed} jobs as inactive (not seen in 7+ days)")
+
+
+@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2)
+def rescue_job_locations(self, limit: int = 300):
+    """
+    Fetch individual job detail pages for jobs that have no location_raw.
+
+    Works through jobs in batches — for each job, fetches the source_url
+    and re-runs schema.org + heuristic extraction to fill location
+    (and employment_type if also missing).  Updates the job record in place.
+
+    Runs automatically on schedule; can also be triggered via the API.
+    """
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.job import Job
+        from app.models.company import Company
+        from app.crawlers.job_extractor import JobExtractor
+        from app.crawlers.http_client import ResilientHTTPClient
+        from app.utils.location_parser import location_normalizer
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            jobs = list(await db.scalars(
+                select(Job)
+                .where(
+                    Job.is_active == True,
+                    Job.location_raw.is_(None),
+                    Job.source_url.isnot(None),
+                )
+                .order_by(Job.first_seen_at.desc())
+                .limit(limit)
+            ))
+
+            if not jobs:
+                logger.info("rescue_job_locations: nothing to do")
+                return 0
+
+            client = ResilientHTTPClient()
+            extractor = JobExtractor(db)
+            updated = 0
+            failed = 0
+
+            import re
+            from urllib.parse import urlparse
+            # Regex to pull city from common ATS URL patterns like /job/{city}/ or /{city}/jobs/
+            _URL_CITY_RE = re.compile(
+                r'/jobs?/([a-z][a-z\-]{2,30})/[^/]',
+                re.IGNORECASE,
+            )
+            _NOT_CITY = frozenset(["all", "search", "view", "apply", "new", "list", "category",
+                                   "openings", "positions", "full", "part", "remote", "hybrid"])
+
+            for job in jobs:
+                try:
+                    loc_raw = None
+                    found = {}
+
+                    # --- Fast path: extract city directly from the URL (no HTTP fetch needed) ---
+                    url_path = urlparse(job.source_url).path
+                    m = _URL_CITY_RE.search(url_path)
+                    if m:
+                        candidate = m.group(1).replace("-", " ").strip().title()
+                        if candidate.lower() not in _NOT_CITY and len(candidate) > 2:
+                            loc_raw = candidate
+
+                    # --- Slow path: fetch the page and extract location ---
+                    if not loc_raw:
+                        try:
+                            resp = await client.get(job.source_url, timeout=20)
+                            if resp.status_code in (200, 203):
+                                html = resp.text
+                                # Schema.org first (highest accuracy)
+                                structured = extractor._extract_structured_data(html, job.source_url)
+                                for r in structured:
+                                    if r.get("location_raw"):
+                                        found = r
+                                        loc_raw = r["location_raw"]
+                                        break
+                                # Heuristic fallback
+                                if not loc_raw:
+                                    heuristic = extractor._extract_heuristic_single_job(html, job.source_url)
+                                    if heuristic:
+                                        found = heuristic[0]
+                                        loc_raw = found.get("location_raw") or ""
+                        except Exception as fetch_err:
+                            logger.debug(f"rescue fetch failed {job.source_url}: {fetch_err}")
+
+                    # --- Apply extracted location ---
+                    if loc_raw:
+                        company = await db.get(Company, job.company_id)
+                        market = (company.market_code if company else None) or "AU"
+                        parsed = location_normalizer.normalize(loc_raw, market)
+                        job.location_raw = loc_raw
+                        if not job.location_city:
+                            job.location_city = parsed.city
+                        if not job.location_state:
+                            job.location_state = parsed.state
+                        if not job.location_country:
+                            job.location_country = parsed.country
+                        if job.is_remote is None:
+                            job.is_remote = parsed.is_remote
+                        updated += 1
+                        job.quality_score = None
+                        job.quality_scored_at = None
+
+                    # Also fill employment_type from page extraction if missing
+                    if found:
+                        new_emp = extractor._normalize_employment_type(found.get("employment_type"))
+                        if new_emp and not job.employment_type:
+                            job.employment_type = new_emp
+
+                except Exception as e:
+                    failed += 1
+                    logger.debug(f"rescue_job_locations: failed for {job.source_url}: {e}")
+
+            await db.commit()
+            logger.info(f"rescue_job_locations: updated {updated}/{len(jobs)} jobs (failed: {failed})")
+            return updated
+
+    return _run_async(_run())
 
     _run_async(_run())

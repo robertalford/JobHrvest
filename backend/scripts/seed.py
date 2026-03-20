@@ -353,11 +353,11 @@ async def seed():
                 "queries": __import__("json").dumps(m["aggregator_search_queries"]),
             })
 
-        # Blocked domains
-        print("  Creating blocked domains...")
+        # Hardcoded off-limits domains → excluded_sites (migration 0012 seeds these too; safe to re-run)
+        print("  Seeding hardcoded blocked domains into excluded_sites...")
         for domain, reason in BLOCKED_DOMAINS:
             await db.execute(text("""
-                INSERT INTO blocked_domains (id, domain, reason)
+                INSERT INTO excluded_sites (id, domain, reason)
                 VALUES (:id, :domain, :reason)
                 ON CONFLICT (domain) DO NOTHING
             """), {"id": str(uuid.uuid4()), "domain": domain, "reason": reason})

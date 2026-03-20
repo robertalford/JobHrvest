@@ -10,6 +10,8 @@ celery_app = Celery(
     include=[
         "app.tasks.crawl_tasks",
         "app.tasks.ml_tasks",
+        "app.tasks.domain_import_tasks",
+        "app.tasks.geocoder_tasks",
     ],
 )
 
@@ -27,25 +29,84 @@ celery_app.conf.update(
         "crawl.career_page": {"queue": "crawl"},
         "crawl.full_cycle": {"queue": "default"},
         "crawl.harvest_aggregators": {"queue": "discovery"},
+        "crawl.seed_market_companies": {"queue": "default"},
         "crawl.mark_inactive_jobs": {"queue": "default"},
         "crawl.validate_page_template": {"queue": "default"},
+        "crawl.fix_company_sites": {"queue": "default"},
+        "crawl.fix_site_structure": {"queue": "crawl"},
+        # Queue drain tasks
+        "queue.drain_company_config": {"queue": "default"},
+        "queue.drain_site_config": {"queue": "crawl"},
+        "queue.drain_job_crawling": {"queue": "crawl"},
+        "queue.drain_discovery": {"queue": "discovery"},
+        "queue.crawl_career_page_from_queue": {"queue": "crawl"},
+        "queue.drain_job_crawling": {"queue": "crawl"},
+        "queue.harvest_aggregator_source": {"queue": "discovery"},
+        "queue.populate_queues": {"queue": "default"},
         "ml.*": {"queue": "ml"},
+        "ml.llm_extract_page": {"queue": "ml"},
+        "ml.enrich_job_descriptions": {"queue": "ml"},
+        "ml.reprocess_company": {"queue": "ml"},
+        "ml.batch_reprocess": {"queue": "ml"},
+        # Domain import tasks
+        "domain_import.tranco": {"queue": "default"},
+        "domain_import.majestic": {"queue": "default"},
+        "domain_import.asic": {"queue": "default"},
+        "domain_import.wikidata": {"queue": "default"},
+        # Geocoder tasks
+        "geocoder.seed_geonames": {"queue": "default"},
+        "geocoder.geocode_new_jobs": {"queue": "default"},
+        "geocoder.retro_geocode_jobs": {"queue": "default"},
     },
     beat_schedule={
-        # Main crawl cycle — every hour, picks up sites due for crawling
-        "scheduled-crawl-cycle": {
-            "task": "crawl.scheduled",
-            "schedule": 3600,
-        },
-        # Aggregator discovery — every 6 hours, find new companies via Indeed AU
-        "harvest-aggregators": {
-            "task": "crawl.harvest_aggregators",
-            "schedule": 6 * 3600,
-        },
+        # ── Queue drains ─────────────────────────────────────────────────────
+        # job_crawling is the high-frequency recurring crawl — drain every 5s
+        # so workers are never idle between batches at scale (50k sites).
+        "drain-job-crawling":    {"task": "queue.drain_job_crawling",    "schedule": 5},
+        # site_config is one-time per site — moderate drain rate is fine
+        "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 15},
+        # company_config is one-time per company — infrequent, no rush
+        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 30},
+        # discovery sources
+        "drain-discovery":       {"task": "queue.drain_discovery",       "schedule": 60},
+        # Populate queues every 2h (safety net — hooks handle real-time adds)
+        "populate-queues": {"task": "queue.populate_queues", "schedule": 2 * 3600},
+        # Safety net: reset items stuck in 'processing' > 2h back to 'pending'
+        "reset-stale-processing": {"task": "queue.reset_stale_processing", "schedule": 30 * 60},
+        # DEPRECATED: crawl.scheduled flooded the queue; now handled by drain tasks
+        # "scheduled-crawl-cycle": { ... }  ← removed
         # Job lifecycle — mark stale jobs inactive daily
         "mark-inactive-jobs": {
             "task": "crawl.mark_inactive_jobs",
             "schedule": 24 * 3600,
+        },
+        # Quality scoring backfill — every 30 min for newly crawled jobs
+        "score-jobs-batch": {
+            "task": "ml.score_jobs_batch",
+            "schedule": 30 * 60,
+            "kwargs": {"limit": 500},
+            "options": {"queue": "ml"},
+        },
+        # Description enrichment — every 20 min
+        "enrich-job-descriptions": {
+            "task": "ml.enrich_job_descriptions",
+            "schedule": 20 * 60,
+            "kwargs": {"limit": 150},
+            "options": {"queue": "ml"},
+        },
+        # Geocode newly crawled jobs — every 2 min
+        "geocode-new-jobs": {
+            "task": "geocoder.geocode_new_jobs",
+            "schedule": 2 * 60,
+            "kwargs": {"limit": 200},
+        },
+        # Location rescue — fetch individual job pages to fill missing location_raw.
+        # Runs every 10 min until backlog is cleared, then becomes a no-op.
+        "rescue-job-locations": {
+            "task": "crawl.rescue_job_locations",
+            "schedule": 10 * 60,
+            "kwargs": {"limit": 400},
+            "options": {"queue": "default"},
         },
     },
 )

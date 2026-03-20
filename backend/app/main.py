@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("JobHarvest API starting up")
+    from app.crawlers.domain_blocklist import refresh_from_db_async
+    await refresh_from_db_async()
+    logger.info("Domain blocklist loaded from excluded_sites")
     yield
     logger.info("JobHarvest API shutting down")
 

@@ -3,6 +3,10 @@ Domain blocklist — hard-blocked at the lowest level of the crawl stack.
 
 CRITICAL: Check every outbound URL against this list before making ANY HTTP request.
 Jora, SEEK, Jobstreet, and JobsDB must NEVER be crawled under any circumstances.
+
+The runtime set is populated from the excluded_sites DB table at:
+  - FastAPI startup (via refresh_from_db_async)
+  - Before each full_crawl_cycle run
 """
 
 from urllib.parse import urlparse
@@ -34,7 +38,7 @@ _HARDCODED_BLOCKED_DOMAINS = frozenset([
     "th.jobsdb.com",
 ])
 
-# Runtime cache populated from DB at startup
+# Runtime cache populated from excluded_sites table
 _db_blocked_domains: set[str] = set()
 
 
@@ -66,6 +70,23 @@ def load_from_db(domains: list[str]) -> None:
     """Load additional blocked domains from the database into the runtime cache."""
     global _db_blocked_domains
     _db_blocked_domains = set(d.lower() for d in domains)
+
+
+async def refresh_from_db_async() -> None:
+    """
+    Async version: refresh the runtime blocklist from the excluded_sites table.
+    Call this at FastAPI startup and before each crawl cycle.
+    """
+    try:
+        from app.db.base import AsyncSessionLocal
+        from sqlalchemy import text
+
+        async with AsyncSessionLocal() as db:
+            rows = await db.execute(text("SELECT domain FROM excluded_sites"))
+            domains = [r[0] for r in rows.fetchall()]
+            load_from_db(domains)
+    except Exception:
+        pass  # Gracefully degrade — hardcoded list still enforced
 
 
 def assert_not_blocked(url: str) -> None:

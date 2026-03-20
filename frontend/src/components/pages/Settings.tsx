@@ -1,13 +1,21 @@
 import { useQuery } from '@tanstack/react-query';
+import { CheckCircle, XCircle, Settings2 } from 'lucide-react';
 import { getSystemHealth } from '../../lib/api';
-import { CheckCircle, XCircle } from 'lucide-react';
 
 export function Settings() {
   const { data: health } = useQuery({ queryKey: ['health'], queryFn: getSystemHealth, refetchInterval: 15000 });
 
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center">
+          <Settings2 className="w-5 h-5 text-gray-600" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">System Health</h1>
+          <p className="text-sm text-gray-500">System status and configuration</p>
+        </div>
+      </div>
 
       <div className="card p-5">
         <h2 className="font-semibold text-gray-900 mb-4">System Status</h2>
@@ -26,34 +34,7 @@ export function Settings() {
               </span>
             </div>
           ))}
-        </div>
-      </div>
-
-      <div className="card p-5">
-        <h2 className="font-semibold text-gray-900 mb-4">Manual Controls</h2>
-        <div className="space-y-3">
-          <button
-            onClick={() => fetch('/api/v1/system/retrain-classifier', { method: 'POST' }).then(() => alert('Retraining queued'))}
-            className="btn-secondary w-full text-left"
-          >
-            Retrain Page Classifier
-          </button>
-          <button
-            onClick={() => fetch('/api/v1/system/rebuild-templates', { method: 'POST' }).then(() => alert('Template rebuild queued'))}
-            className="btn-secondary w-full text-left"
-          >
-            Rebuild Extraction Templates
-          </button>
-        </div>
-      </div>
-
-      <div className="card p-5">
-        <h2 className="font-semibold text-gray-900 mb-2">About</h2>
-        <div className="text-sm text-gray-500 space-y-1">
-          <div>Version: 0.1.0 — Phase 1</div>
-          <div>Market: Australia (AU)</div>
-          <div>Blocked domains: SEEK, Jora, Jobstreet, JobsDB</div>
-          <div>Link discovery sources: Indeed AU, LinkedIn, Glassdoor AU, CareerOne, Adzuna AU</div>
+          {!health?.services && <p className="text-sm text-gray-400">Loading…</p>}
         </div>
       </div>
     </div>

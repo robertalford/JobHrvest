@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getFieldCoverage, getTrends, getQualityDistribution, getQualityBySite, triggerQualityScoring } from '../../lib/api';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts';
+import { getFieldCoverage, getTrends, getQualityDistribution, getQualityBySite, triggerQualityScoring, getMarketBreakdown } from '../../lib/api';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, BarChart, Bar } from 'recharts';
 
 const BAND_COLORS: Record<string, string> = {
   excellent: '#0e8136',
@@ -16,21 +16,38 @@ export function Analytics() {
   const { data: trends } = useQuery({ queryKey: ['trends'], queryFn: getTrends });
   const { data: quality } = useQuery({ queryKey: ['quality-distribution'], queryFn: getQualityDistribution, refetchInterval: 15000 });
   const { data: qualitySites } = useQuery({ queryKey: ['quality-by-site'], queryFn: getQualityBySite });
+  const { data: marketData } = useQuery({ queryKey: ['market-breakdown'], queryFn: getMarketBreakdown, refetchInterval: 30000 });
 
   const scoreMutation = useMutation({
     mutationFn: triggerQualityScoring,
     onSuccess: () => setTimeout(() => qc.invalidateQueries({ queryKey: ['quality-distribution'] }), 3000),
   });
 
-  const fields = coverage ? [
-    { label: 'Title', pct: coverage.title_pct },
-    { label: 'Description', pct: coverage.description_pct },
-    { label: 'Location', pct: coverage.location_pct },
-    { label: 'Salary', pct: coverage.salary_pct },
-    { label: 'Employment Type', pct: coverage.employment_type_pct },
-    { label: 'Seniority', pct: coverage.seniority_pct },
-    { label: 'Requirements', pct: coverage.requirements_pct },
-    { label: 'Benefits', pct: coverage.benefits_pct },
+  const fieldGroups = coverage ? [
+    {
+      heading: 'Core data',
+      fields: [
+        { label: 'Company Name', pct: coverage.company_name_pct },
+        { label: 'Role Title', pct: coverage.title_pct },
+        { label: 'Description', pct: coverage.description_pct },
+        { label: 'Location', pct: coverage.location_pct },
+      ],
+    },
+    {
+      heading: 'High quality attributes',
+      fields: [
+        { label: 'Employment Type', pct: coverage.employment_type_pct },
+        { label: 'Salary', pct: coverage.salary_pct },
+      ],
+    },
+    {
+      heading: 'Very high quality attributes',
+      fields: [
+        { label: 'Seniority', pct: coverage.seniority_pct },
+        { label: 'Requirements', pct: coverage.requirements_pct },
+        { label: 'Benefits', pct: coverage.benefits_pct },
+      ],
+    },
   ] : [];
 
   const bandData = quality?.bands
@@ -47,9 +64,64 @@ export function Analytics() {
   const topSites = (qualitySites || []).slice(0, 10);
   const bottomSites = (qualitySites || []).slice(-10).reverse();
 
+  type MarketRow = { market: string; jobs: number; companies: number; avg_quality: number | null };
+  const markets: MarketRow[] = (marketData as MarketRow[] | undefined) ?? [];
+  const totalJobs = markets.reduce((s, m) => s + m.jobs, 0);
+
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Extraction Analytics</h1>
+      <h1 className="text-2xl font-bold text-gray-900">Analytics</h1>
+
+      {/* Market breakdown */}
+      {markets.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="card p-5">
+            <h2 className="font-semibold text-gray-900 mb-4">Jobs by Market</h2>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={markets} layout="vertical" margin={{ left: 8, right: 16 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11 }} />
+                <YAxis dataKey="market" type="category" tick={{ fontSize: 12, fontWeight: 600 }} width={36} />
+                <Tooltip formatter={(v: unknown) => typeof v === 'number' ? v.toLocaleString() : String(v)} />
+                <Bar dataKey="jobs" fill="#0e8136" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card p-5">
+            <h2 className="font-semibold text-gray-900 mb-3">Market Summary</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    <th className="text-left py-2 text-xs font-semibold text-gray-500">Market</th>
+                    <th className="text-right py-2 text-xs font-semibold text-gray-500">Jobs</th>
+                    <th className="text-right py-2 text-xs font-semibold text-gray-500">Share</th>
+                    <th className="text-right py-2 text-xs font-semibold text-gray-500">Cos</th>
+                    <th className="text-right py-2 text-xs font-semibold text-gray-500">Avg Q</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {markets.map(m => (
+                    <tr key={m.market}>
+                      <td className="py-2 font-mono font-semibold text-gray-800">{m.market}</td>
+                      <td className="py-2 text-right text-gray-700">{m.jobs.toLocaleString()}</td>
+                      <td className="py-2 text-right text-gray-500">{totalJobs > 0 ? ((m.jobs / totalJobs) * 100).toFixed(1) : 0}%</td>
+                      <td className="py-2 text-right text-gray-500">{m.companies.toLocaleString()}</td>
+                      <td className="py-2 text-right">
+                        {m.avg_quality != null ? (
+                          <span className={`font-semibold ${m.avg_quality >= 60 ? 'text-green-600' : m.avg_quality >= 40 ? 'text-amber-500' : 'text-red-500'}`}>
+                            {m.avg_quality}
+                          </span>
+                        ) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Jobs over time */}
       <div className="card p-5">
@@ -215,18 +287,25 @@ export function Analytics() {
       <div className="card p-5">
         <h2 className="font-semibold text-gray-900 mb-1">Field Coverage</h2>
         <p className="text-xs text-gray-400 mb-4">% of active jobs with each field populated</p>
-        <div className="space-y-3">
-          {fields.map(({ label, pct }) => (
-            <div key={label}>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-gray-700">{label}</span>
-                <span className="font-medium text-gray-900">{pct?.toFixed(1) ?? 0}%</span>
-              </div>
-              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${pct ?? 0}%`, backgroundColor: pct >= 90 ? '#0e8136' : pct >= 70 ? '#eab308' : '#ef4444' }}
-                />
+        <div className="space-y-6">
+          {fieldGroups.map(({ heading, fields }) => (
+            <div key={heading}>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">{heading}</div>
+              <div className="space-y-3">
+                {fields.map(({ label, pct }) => (
+                  <div key={label}>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-gray-700">{label}</span>
+                      <span className="font-medium text-gray-900">{pct?.toFixed(1) ?? 0}%</span>
+                    </div>
+                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full"
+                        style={{ width: `${pct ?? 0}%`, backgroundColor: pct >= 90 ? '#0e8136' : pct >= 70 ? '#eab308' : '#ef4444' }}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))}

@@ -1,11 +1,14 @@
 :80 {
-    # Frontend
-    handle /* {
-        reverse_proxy frontend:80
-    }
-
-    # API
+    # API — must be matched before the catch-all
     handle /api/* {
         reverse_proxy api:8000
+    }
+
+    # Frontend — Vite dev server with HMR websocket support
+    handle /* {
+        reverse_proxy frontend:5173 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+        }
     }
 }

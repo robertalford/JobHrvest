@@ -47,6 +47,12 @@ class Job(Base):
     extraction_method: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # structural, llm, schema_org, ats_api, hybrid
     extraction_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Deduplication
+    canonical_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    is_canonical: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    duplicate_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    dedup_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Quality scoring
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     quality_completeness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -54,6 +60,17 @@ class Job(Base):
     quality_issues: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     quality_flags: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     quality_scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    quality_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # Description enrichment tracking — NULL = not yet attempted
+    description_enriched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Geocoding — NULL=not attempted  TRUE=resolved  FALSE=failed
+    geo_location_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("geo_locations.id"), nullable=True)
+    geo_level: Mapped[Optional[int]] = mapped_column(nullable=True)
+    geo_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    geo_resolution_method: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    geo_resolved: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

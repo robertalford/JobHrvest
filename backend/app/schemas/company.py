@@ -31,13 +31,13 @@ class CompanyRead(BaseModel):
     market_code: str
     ats_platform: Optional[str]
     ats_confidence: Optional[float]
-    crawl_priority: int
-    crawl_frequency_hours: int
+    crawl_priority: Optional[int]
+    crawl_frequency_hours: Optional[int]
     last_crawl_at: Optional[datetime]
     next_crawl_at: Optional[datetime]
     is_active: bool
-    requires_js_rendering: bool
-    anti_bot_level: str
+    requires_js_rendering: Optional[bool]
+    anti_bot_level: Optional[str]
     discovered_via: Optional[str]
     notes: Optional[str]
     created_at: datetime

@@ -1,4 +1,4 @@
-.PHONY: help up down restart logs db-migrate db-seed shell-api shell-db reset pull-model
+.PHONY: help up down restart logs db-migrate db-seed shell-api shell-db reset pull-model deploy-frontend
 
 DOCKER_COMPOSE = docker compose
 COLIMA_CPU     = 4
@@ -59,6 +59,13 @@ reset: ## Full reset — stop, remove volumes, restart (DESTRUCTIVE)
 	sleep 10
 	$(MAKE) db-migrate
 	$(MAKE) db-seed
+
+deploy-frontend: ## Rebuild frontend dev image (only needed after package.json changes — source changes are live via HMR)
+	$(DOCKER_COMPOSE) build --no-cache frontend
+	$(DOCKER_COMPOSE) up -d --force-recreate frontend
+
+build-frontend-prod: ## Build production nginx image (for stable releases)
+	$(DOCKER_COMPOSE) build --no-cache --build-arg DOCKERFILE=Dockerfile frontend
 
 crawl-trigger: ## Trigger a full crawl cycle
 	curl -s -X POST http://localhost:8000/api/v1/crawl/trigger-full | python3 -m json.tool

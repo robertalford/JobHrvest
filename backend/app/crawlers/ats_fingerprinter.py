@@ -35,7 +35,7 @@ ATS_SIGNATURES: list[dict] = [
     {
         "platform": "workday",
         "url_patterns": [r"myworkdayjobs\.com", r"wd\d+\.myworkdayjobs\.com"],
-        "dom_patterns": [r'workday', r'wd-'),
+        "dom_patterns": [r'workday', r'wd-'],
         "script_patterns": [r'workday'],
         "confidence_base": 0.95,
     },
