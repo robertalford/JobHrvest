@@ -484,6 +484,28 @@ def fix_company_sites(self, company_id: str, queue_item_id: str = None):
 
             started_at = datetime.now(timezone.utc)
             try:
+                # ── ATS bulk shortcut ─────────────────────────────────────
+                # If the company has a known ATS platform with a bulk API,
+                # skip per-page discovery entirely and dispatch ats_bulk_extract.
+                # This replaces N page crawls with 1 API call.
+                from app.crawlers.ats_bulk_extractor import ATSBulkExtractor
+                _ats_platform = (company.ats_platform or "").lower().strip()
+                _ats_bulk = ATSBulkExtractor()
+                if _ats_platform and _ats_platform not in ("unknown", "custom") and _ats_bulk.supports(_ats_platform):
+                    # ats_bulk_shortcut: dispatch bulk extract and skip page discovery
+                    ats_bulk_extract.apply_async(
+                        args=[str(company.id)],
+                        kwargs={"queue_item_id": queue_item_id} if queue_item_id else {},
+                    )
+                    log.status = "success"
+                    log.completed_at = datetime.now(timezone.utc)
+                    log.duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+                    log.error_message = f"ats_bulk_shortcut: dispatched to ats_bulk_extract ({_ats_platform})"
+                    # Don't complete queue_item_id here — ats_bulk_extract will do it
+                    await db.commit()
+                    logger.info(f"fix_company_sites: ATS bulk shortcut for {company.domain} ({_ats_platform})")
+                    return
+
                 extractor = CompanySiteExtractor(db)
                 pages = await extractor.extract(company)
 
@@ -1285,4 +1307,366 @@ def deactivate_empty_pages():
             await db.commit()
             if deactivated:
                 logger.info(f"Deactivated {deactivated} empty career pages (crawled 3+ times, 0 jobs)")
+    _run_async(_run())
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    name="crawl.ats_bulk_extract",
+    soft_time_limit=300,   # 5 min soft limit
+    time_limit=360,        # 6 min hard kill
+)
+def ats_bulk_extract(self, company_id: str, queue_item_id: str = None):
+    """
+    ATS Bulk Extract — one API call to get ALL jobs for a company.
+
+    Bypasses per-page crawling entirely for companies with a known ATS platform.
+    This is the fastest path through the pipeline: instead of discovering career
+    pages, mapping site structure, and crawling individual pages, we call the
+    ATS platform's public API to get every open position in one shot.
+
+    The full post-extraction pipeline (dedup, scoring, geocoding) runs inline
+    just like crawl_company.
+    """
+
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.company import Company
+        from app.models.career_page import CareerPage
+        from app.models.crawl_log import CrawlLog
+        from app.crawlers.ats_bulk_extractor import ATSBulkExtractor
+        from app.crawlers.job_extractor import JobExtractor
+        from app.services import queue_manager
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            company = await db.get(Company, uuid.UUID(company_id))
+            if not company or not company.is_active:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+
+            platform = (company.ats_platform or "").lower().strip()
+            bulk = ATSBulkExtractor()
+            if not bulk.supports(platform):
+                logger.info(
+                    f"ats_bulk_extract: unsupported platform '{platform}' "
+                    f"for {company.domain}, skipping"
+                )
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+
+            # Create crawl log
+            log = CrawlLog(
+                company_id=company.id,
+                crawl_type="ats_bulk",
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(log)
+            await db.commit()
+
+            started_at = datetime.now(timezone.utc)
+
+            try:
+                # Gather existing career pages for slug extraction
+                career_pages = list(await db.scalars(
+                    select(CareerPage).where(
+                        CareerPage.company_id == company.id,
+                        CareerPage.is_active == True,
+                    )
+                ))
+
+                # Extract all jobs via the bulk API
+                jobs_data = await bulk.extract_all(company, career_pages)
+
+                if not jobs_data:
+                    log.status = "success"
+                    log.jobs_found = 0
+                    log.jobs_new = 0
+                    log.completed_at = datetime.now(timezone.utc)
+                    log.duration_seconds = (
+                        datetime.now(timezone.utc) - started_at
+                    ).total_seconds()
+                    if queue_item_id:
+                        await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                    logger.info(
+                        f"ats_bulk_extract: 0 jobs for {company.domain} ({platform})"
+                    )
+                    return
+
+                # Use JobExtractor for enrichment and upsert (reuse existing logic)
+                extractor = JobExtractor(db)
+
+                # We need a career page for upsert; use the primary one or create
+                # a synthetic one if none exists
+                primary_page = None
+                for p in career_pages:
+                    if getattr(p, "is_primary", False):
+                        primary_page = p
+                        break
+                if not primary_page and career_pages:
+                    primary_page = career_pages[0]
+
+                if not primary_page:
+                    # Create a synthetic career page for this ATS board
+                    first_url = jobs_data[0].get("source_url", company.root_url) if jobs_data else company.root_url
+                    from app.crawlers.career_page_discoverer import CareerPageDiscoverer
+                    discoverer = CareerPageDiscoverer(db)
+                    primary_page = await discoverer._upsert_career_page(
+                        company, first_url, {
+                            "discovery_method": "ats_bulk",
+                            "confidence": 0.95,
+                            "is_primary": True,
+                            "page_type": "listing_page",
+                        }
+                    )
+
+                total_jobs = 0
+                jobs_new = 0
+                for job_data in jobs_data:
+                    job_data = extractor._enrich(job_data, company)
+                    job = await extractor._upsert_job(company, primary_page, job_data)
+                    if job:
+                        await extractor._save_tags(job, job_data)
+                        total_jobs += 1
+                        if job.created_at >= started_at:
+                            jobs_new += 1
+
+                # Update company crawl schedule
+                company.last_crawl_at = datetime.now(timezone.utc)
+                company.next_crawl_at = datetime.now(timezone.utc) + timedelta(
+                    hours=company.crawl_frequency_hours or 24
+                )
+
+                # Run deduplication
+                if total_jobs > 0:
+                    from app.services.job_deduplicator import run_company_dedup
+                    await run_company_dedup(db, company.id)
+
+                # Score jobs
+                if total_jobs > 0:
+                    from app.services.quality_scorer import score_job, compute_site_quality
+                    from sqlalchemy import select as sa_select, or_ as sa_or
+                    from app.models.job import Job
+
+                    unscored = list(await db.scalars(
+                        sa_select(Job).where(
+                            Job.company_id == company.id,
+                            sa_or(
+                                Job.quality_score.is_(None),
+                                Job.quality_scored_at.is_(None),
+                            ),
+                        )
+                    ))
+                    job_scores = []
+                    has_scam = False
+                    has_disc = False
+                    for j in unscored:
+                        qr = score_job(
+                            title=j.title,
+                            description=j.description,
+                            location_raw=j.location_raw,
+                            employment_type=j.employment_type,
+                            date_posted=j.date_posted,
+                            salary_raw=j.salary_raw,
+                            requirements=j.requirements,
+                        )
+                        j.quality_score = qr.score
+                        j.quality_completeness = qr.completeness_score
+                        j.quality_description = qr.description_score
+                        j.quality_issues = qr.issues
+                        j.quality_flags = {
+                            "scam_detected": qr.scam_detected,
+                            "bad_words_detected": qr.bad_words_detected,
+                            "discrimination_detected": qr.discrimination_detected,
+                        }
+                        j.quality_scored_at = datetime.now(timezone.utc)
+                        job_scores.append(qr.score)
+                        if qr.scam_detected:
+                            has_scam = True
+                        if qr.discrimination_detected:
+                            has_disc = True
+
+                    if job_scores:
+                        company.quality_score = compute_site_quality(
+                            job_scores, has_scam, has_disc
+                        )
+                        company.quality_scored_at = datetime.now(timezone.utc)
+                    await db.commit()
+
+                # Geocode jobs
+                if total_jobs > 0:
+                    try:
+                        from app.services.geocoder import geocoder_service
+                        from sqlalchemy import select as sa_select2
+                        from app.models.job import Job as JobModel
+
+                        ungeo = list(await db.scalars(
+                            sa_select2(JobModel).where(
+                                JobModel.company_id == company.id,
+                                JobModel.geo_resolved.is_(None),
+                            )
+                        ))
+                        for j in ungeo:
+                            loc_text = (
+                                j.location_raw or j.location_city or ""
+                            ).strip()
+                            if loc_text:
+                                geo = await geocoder_service.geocode(
+                                    db, loc_text, company.market_code or "AU"
+                                )
+                                if geo:
+                                    j.geo_location_id = uuid.UUID(
+                                        geo.geo_location_id
+                                    )
+                                    j.geo_level = geo.level
+                                    j.geo_confidence = geo.confidence
+                                    j.geo_resolution_method = geo.method
+                                    j.geo_resolved = True
+                                else:
+                                    j.geo_resolved = False
+                                    j.geo_resolution_method = "unresolvable"
+                            else:
+                                j.geo_resolved = False
+                                j.geo_resolution_method = "no_location"
+                        if ungeo:
+                            await db.commit()
+                            resolved = sum(1 for j in ungeo if j.geo_resolved)
+                            logger.info(
+                                f"Geocoded {resolved}/{len(ungeo)} jobs "
+                                f"for {company.domain}"
+                            )
+                    except Exception as geo_exc:
+                        logger.warning(
+                            f"Geocoding failed for {company.domain}: {geo_exc}"
+                        )
+
+                log.status = "success"
+                log.completed_at = datetime.now(timezone.utc)
+                log.jobs_found = total_jobs
+                log.jobs_new = jobs_new
+                log.duration_seconds = (
+                    datetime.now(timezone.utc) - started_at
+                ).total_seconds()
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+
+                logger.info(
+                    f"ats_bulk_extract complete for {company.domain} ({platform}): "
+                    f"{total_jobs} jobs ({jobs_new} new) in "
+                    f"{log.duration_seconds:.1f}s"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"ats_bulk_extract failed for {company_id}: {e}",
+                    exc_info=True,
+                )
+                log.status = "failed"
+                log.error_message = str(e)[:500]
+                log.completed_at = datetime.now(timezone.utc)
+                log.duration_seconds = (
+                    datetime.now(timezone.utc) - started_at
+                ).total_seconds()
+                if queue_item_id:
+                    await queue_manager.fail(
+                        db, uuid.UUID(queue_item_id), str(e)
+                    )
+                await db.commit()
+                raise self.retry(exc=e)
+
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_ats_bulk")
+def drain_ats_bulk():
+    """Drain ATS bulk extract queue: claim batch and dispatch ats_bulk_extract for each."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "ats_bulk", batch_size=50)
+            await db.commit()
+            for row in items:
+                queue_item_id, company_id = row[0], row[1]
+                if company_id:
+                    ats_bulk_extract.apply_async(args=[str(company_id), str(queue_item_id)])
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.enforce_quality_gate")
+def enforce_quality_gate():
+    """Enforce minimum quality standards on active jobs.
+
+    Core fields required: title, description (>50 chars), location_raw.
+    Jobs missing location_raw get queued for location rescue.
+    Jobs with no title or very short description are deactivated.
+    Runs every 2 hours.
+    """
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as db:
+            # 1. Rescore jobs: penalize missing core fields
+            # quality_score formula: base 0.4 + 0.2*(has_description) + 0.2*(has_location) + 0.1*(has_employment_type) + 0.1*(has_salary)
+            result = await db.execute(text("""
+                UPDATE jobs SET
+                    quality_score = GREATEST(0.05,
+                        0.40
+                        + CASE WHEN description IS NOT NULL AND length(description) > 50 THEN 0.20 ELSE 0.0 END
+                        + CASE WHEN location_raw IS NOT NULL AND location_raw != '' THEN 0.20 ELSE 0.0 END
+                        + CASE WHEN employment_type IS NOT NULL THEN 0.10 ELSE 0.0 END
+                        + CASE WHEN salary_raw IS NOT NULL AND salary_raw != '' THEN 0.10 ELSE 0.0 END
+                    ),
+                    quality_scored_at = NOW()
+                WHERE is_active = true
+                AND (quality_score IS NULL OR quality_scored_at IS NULL
+                     OR quality_scored_at < NOW() - INTERVAL '24 hours')
+            """))
+            rescored = result.rowcount
+            await db.commit()
+
+            # 2. Deactivate jobs with no title (should never happen) or truly empty
+            result2 = await db.execute(text("""
+                UPDATE jobs SET is_active = false
+                WHERE is_active = true
+                AND (title IS NULL OR title = '' OR length(title) < 3)
+            """))
+            deactivated = result2.rowcount
+            await db.commit()
+
+            # 3. Queue location rescue for jobs missing location_raw but having a source_url
+            # (rescue_job_locations already exists as a beat task, just bump its priority)
+            missing_loc = await db.execute(text("""
+                SELECT COUNT(*) FROM jobs
+                WHERE is_active = true
+                AND (location_raw IS NULL OR location_raw = '')
+                AND source_url IS NOT NULL AND source_url != ''
+            """))
+            missing_count = missing_loc.scalar() or 0
+
+            # 4. Log summary
+            logger.info(
+                f"Quality gate: rescored={rescored}, deactivated={deactivated}, "
+                f"missing_location={missing_count}"
+            )
+
+            # 5. Trigger immediate geocoding for ungeocoded jobs
+            pending_geo = await db.execute(text("""
+                SELECT COUNT(*) FROM jobs
+                WHERE is_active = true
+                AND location_raw IS NOT NULL AND location_raw != ''
+                AND (geo_resolved IS NULL OR geo_resolved = false)
+            """))
+            pending_geo_count = pending_geo.scalar() or 0
+            if pending_geo_count > 0:
+                logger.info(f"Quality gate: {pending_geo_count} jobs need geocoding")
+
     _run_async(_run())

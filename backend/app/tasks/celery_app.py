@@ -88,6 +88,11 @@ celery_app.conf.update(
             "task": "queue.deactivate_empty_pages",
             "schedule": 6 * 3600,
         },
+        # Enforce quality gate: rescore jobs, deactivate bad ones, trigger location rescue
+        "enforce-quality-gate": {
+            "task": "queue.enforce_quality_gate",
+            "schedule": 2 * 3600,
+        },
         # Quality scoring backfill — every 30 min for newly crawled jobs
         "score-jobs-batch": {
             "task": "ml.score_jobs_batch",
@@ -118,8 +123,8 @@ celery_app.conf.update(
         },
         "rescue-job-locations": {
             "task": "crawl.rescue_job_locations",
-            "schedule": 10 * 60,
-            "kwargs": {"limit": 400},
+            "schedule": 5 * 60,
+            "kwargs": {"limit": 800},
             "options": {"queue": "default"},
         },
     },
