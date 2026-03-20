@@ -543,6 +543,46 @@ def fix_site_structure(self, career_page_id: str, queue_item_id: str = None):
                     await db.commit()
                 return
 
+            # ── Fast-skip: company already has another ok page ────────────────
+            # If another career_page for this company is already ok, skip this
+            # one to focus site_config capacity on companies with zero coverage.
+            from sqlalchemy import text as _text_skip
+            has_ok = await db.scalar(_text_skip("""
+                SELECT EXISTS(
+                    SELECT 1 FROM career_pages
+                    WHERE company_id = :cid AND site_status = 'ok'
+                      AND is_active = true AND id != :pid
+                )
+            """), {"cid": str(page.company_id), "pid": str(page.id)})
+            if has_ok:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                logger.debug(f"Skipping {page.url}: company already has ok career page")
+                return
+
+            # ── Fast-skip: known-bad URL patterns ─────────────────────────────
+            # These URL patterns almost never contain job listings. Skip them
+            # instead of spending 2+ minutes running all extraction layers.
+            _url = page.url or ""
+            _BAD_PATTERNS = [
+                "/wechat/ShareJob", "/wechat/share", "pagestamp=",
+                "/saved-jobs", "/job-alerts", "/sign-in", "/login",
+                "/register", "/forgot-password", "/content/dam/",
+                "mailto:", "javascript:", "#content",
+            ]
+            if any(p in _url for p in _BAD_PATTERNS):
+                from sqlalchemy import text as _text_bad
+                await db.execute(
+                    _text_bad("UPDATE career_pages SET site_status = 'no_structure_broken' WHERE id = :id"),
+                    {"id": str(page.id)},
+                )
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                await db.commit()
+                logger.debug(f"Skipping bad URL pattern: {_url}")
+                return
+
             # Clean up zombie running logs from previously crashed runs
             from sqlalchemy import text as sa_text
             await db.execute(sa_text("""
@@ -604,7 +644,7 @@ def drain_company_config():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=30)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=60)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]
@@ -853,11 +893,13 @@ def populate_queues():
                 ON CONFLICT DO NOTHING
             """))
             # job_crawling: all active sites not already pending/processing
+            # 24h cooldown: only re-queue pages not crawled in the last 24 hours
             r3 = await db.execute(text("""
                 INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
                 SELECT 'job_crawling', cp.id, 'career_page', 5, 'scheduled_populate'
                 FROM career_pages cp
                 WHERE cp.is_active = true
+                  AND (cp.last_crawled_at IS NULL OR cp.last_crawled_at < NOW() - INTERVAL '24 hours')
                   AND NOT EXISTS (
                     SELECT 1 FROM run_queue rq
                     WHERE rq.queue_type = 'job_crawling' AND rq.item_id = cp.id

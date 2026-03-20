@@ -66,12 +66,12 @@ celery_app.conf.update(
         "drain-job-crawling":    {"task": "queue.drain_job_crawling",    "schedule": 5},
         # site_config is one-time per site — moderate drain rate is fine
         "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 10},
-        # company_config is one-time per company — infrequent, no rush
-        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 60},
+        # company_config is one-time per company — aggressive drain to clear 14k backlog
+        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 10},
         # discovery sources
         "drain-discovery":       {"task": "queue.drain_discovery",       "schedule": 60},
-        # Populate queues every 2h (safety net — hooks handle real-time adds)
-        "populate-queues": {"task": "queue.populate_queues", "schedule": 1 * 3600},
+        # Populate queues every 30 min (clears backlog faster; hourly was too slow)
+        "populate-queues": {"task": "queue.populate_queues", "schedule": 30 * 60},
         # Safety net: reset items stuck in 'processing' > 2h back to 'pending'
         "reset-stale-processing": {"task": "queue.reset_stale_processing", "schedule": 15 * 60},
         # Auto-rebalance worker queue subscriptions based on live queue depths
