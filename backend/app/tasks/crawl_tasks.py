@@ -647,7 +647,7 @@ def drain_job_crawling():
                 if page_id:
                     crawl_career_page_from_queue.apply_async(
                         args=[str(page_id), str(queue_item_id)],
-                        queue="crawl",
+                        queue="crawl_jobs",
                     )
     _run_async(_run())
 
