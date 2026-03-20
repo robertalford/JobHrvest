@@ -945,6 +945,13 @@ class JobExtractor:
 
     def _enrich(self, data: dict, company: Company) -> dict:
         """Apply location parsing, salary parsing, and market defaults."""
+        # Description normalization — schema.org can return description as a dict
+        desc_raw = data.get("description")
+        if isinstance(desc_raw, dict):
+            data["description"] = str(desc_raw.get("@value") or desc_raw.get("value") or "")
+        elif desc_raw is not None:
+            data["description"] = str(desc_raw)
+
         # Location normalization — coerce to string first (schema.org can return dicts)
         loc_raw = data.get("location_raw")
         if isinstance(loc_raw, dict):
@@ -1026,7 +1033,7 @@ class JobExtractor:
             needs_rescore = False
 
             # Opportunistically upgrade a short/missing description
-            new_desc = (data.get("description") or "").strip()
+            new_desc = str(data.get("description") or "").strip()
             existing_desc_len = len(existing.description or "")
             if new_desc and len(new_desc) > existing_desc_len and existing_desc_len < 200:
                 existing.description = new_desc
@@ -1034,7 +1041,7 @@ class JobExtractor:
                 needs_rescore = True
 
             # Fill in missing location fields
-            new_loc = (data.get("location_raw") or "").strip()
+            new_loc = str(data.get("location_raw") or "").strip()
             if new_loc and not existing.location_raw:
                 existing.location_raw = new_loc
                 existing.location_city = existing.location_city or data.get("location_city")

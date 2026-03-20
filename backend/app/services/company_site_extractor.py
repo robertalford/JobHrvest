@@ -52,17 +52,20 @@ class CompanySiteExtractor:
             await self._set_status(company, STATUS_OK)
             return pages
 
-        # Layer 5: 3B LLM — ask LLM to identify career page URL from homepage content
-        pages = await self._layer_llm(company, model="qwen2.5:3b")
-        if pages:
-            await self._set_status(company, STATUS_OK)
-            return pages
+        # Layers 5-6: LLM discovery — only if enabled (disabled during bulk runs for speed)
+        from app.core.config import settings as _settings
+        if getattr(_settings, "COMPANY_SITE_LLM_ENABLED", True):
+            # Layer 5: 3B LLM — ask LLM to identify career page URL from homepage content
+            pages = await self._layer_llm(company, model="qwen2.5:3b")
+            if pages:
+                await self._set_status(company, STATUS_OK)
+                return pages
 
-        # Layer 6: 8B LLM — escalate to more capable model
-        pages = await self._layer_llm(company, model="llama3.1:8b")
-        if pages:
-            await self._set_status(company, STATUS_OK)
-            return pages
+            # Layer 6: 8B LLM — escalate to more capable model
+            pages = await self._layer_llm(company, model="llama3.1:8b")
+            if pages:
+                await self._set_status(company, STATUS_OK)
+                return pages
 
         # All layers exhausted — determine broken vs new
         had_pages_before = company.last_crawl_at is not None

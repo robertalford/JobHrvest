@@ -6,9 +6,19 @@ logger = logging.getLogger(__name__)
 
 
 async def enqueue(db, queue_type: str, item_id: uuid.UUID = None, priority: int = 5, added_by: str = "system") -> bool:
-    """Add item to queue if not already pending. Returns True if a new item was added."""
+    """Add item to queue if not already pending/processing. Re-queues done/failed items. Returns True."""
     from sqlalchemy import text
     try:
+        # For job_crawling: delete stale done/failed rows so the item can be re-inserted
+        # (the unique index only prevents duplicate *pending* rows, so we only need to
+        # remove existing done/failed rows to allow a fresh pending insertion).
+        if queue_type == "job_crawling" and item_id:
+            await db.execute(text("""
+                DELETE FROM run_queue
+                WHERE queue_type = :qt AND item_id = :item_id
+                  AND status IN ('done', 'failed')
+            """), {"qt": queue_type, "item_id": str(item_id)})
+
         await db.execute(text("""
             INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
             VALUES (:qt, :item_id, :item_type, :priority, :added_by)

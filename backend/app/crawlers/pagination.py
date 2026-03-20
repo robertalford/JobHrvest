@@ -120,7 +120,10 @@ class PaginationHandler:
             qs = parse_qs(parsed.query, keep_blank_values=True)
             for param in URL_PAGINATION_PARAMS:
                 if param in qs:
-                    page_num = int(qs[param][0]) + 1
+                    try:
+                        page_num = int(qs[param][0]) + 1
+                    except (ValueError, TypeError):
+                        continue  # param value is not a page number (e.g. location filter)
                     for p in range(page_num, page_num + 20):
                         qs[param] = [str(p)]
                         new_query = urlencode(qs, doseq=True)

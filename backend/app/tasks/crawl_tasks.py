@@ -604,7 +604,7 @@ def drain_company_config():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=50)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=150)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]
@@ -620,7 +620,7 @@ def drain_site_config():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "site_config", batch_size=50)
+            items = await queue_manager.claim_batch(db, "site_config", batch_size=150)
             await db.commit()
             for row in items:
                 queue_item_id, page_id = row[0], row[1]
@@ -640,7 +640,7 @@ def drain_job_crawling():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "job_crawling", batch_size=250)
+            items = await queue_manager.claim_batch(db, "job_crawling", batch_size=500)
             await db.commit()
             for row in items:
                 queue_item_id, page_id = row[0], row[1]
@@ -800,41 +800,63 @@ def reset_stale_processing():
 @celery_app.task(name="queue.populate_queues")
 def populate_queues():
     """Populate all 4 queues with items that should be processed.
-    Run every 2h as a safety net — auto-enqueue hooks handle real-time adds."""
+    Uses bulk SQL inserts for efficiency — avoids N+1 Python loops over 20k+ rows.
+    Run every 1h as a safety net — auto-enqueue hooks handle real-time adds."""
     async def _run():
         from app.db.base import AsyncSessionLocal
-        from app.services import queue_manager
-        from app.models.company import Company
-        from app.models.career_page import CareerPage
-        from app.models.aggregator_source import AggregatorSource
-        from sqlalchemy import select
+        from sqlalchemy import text
         async with AsyncSessionLocal() as db:
-            # company_config: non-ok companies
-            companies = await db.scalars(
-                select(Company).where(Company.is_active == True, Company.company_status != 'ok')
-            )
-            for c in companies:
-                await queue_manager.enqueue(db, "company_config", c.id, added_by="scheduled_populate")
-            # site_config: non-ok sites
-            pages = await db.scalars(
-                select(CareerPage).where(CareerPage.is_active == True, CareerPage.site_status != 'ok')
-            )
-            for p in pages:
-                await queue_manager.enqueue(db, "site_config", p.id, added_by="scheduled_populate")
-            # job_crawling: all active sites
-            due_pages = await db.scalars(
-                select(CareerPage).where(CareerPage.is_active == True)
-            )
-            for p in due_pages:
-                await queue_manager.enqueue(db, "job_crawling", p.id, added_by="scheduled_populate")
-            # discovery: all active sources
-            sources = await db.scalars(
-                select(AggregatorSource).where(AggregatorSource.is_active == True)
-            )
-            for s in sources:
-                await queue_manager.enqueue(db, "discovery", s.id, added_by="scheduled_populate")
+            # company_config: non-ok companies not already pending
+            r1 = await db.execute(text("""
+                INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
+                SELECT 'company_config', c.id, 'company', 5, 'scheduled_populate'
+                FROM companies c
+                WHERE c.is_active = true AND c.company_status != 'ok'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM run_queue rq
+                    WHERE rq.queue_type = 'company_config' AND rq.item_id = c.id AND rq.status = 'pending'
+                  )
+                ON CONFLICT DO NOTHING
+            """))
+            # site_config: non-ok sites not already pending
+            r2 = await db.execute(text("""
+                INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
+                SELECT 'site_config', cp.id, 'career_page', 5, 'scheduled_populate'
+                FROM career_pages cp
+                WHERE cp.is_active = true AND cp.site_status != 'ok'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM run_queue rq
+                    WHERE rq.queue_type = 'site_config' AND rq.item_id = cp.id AND rq.status = 'pending'
+                  )
+                ON CONFLICT DO NOTHING
+            """))
+            # job_crawling: all active sites not already pending/processing
+            r3 = await db.execute(text("""
+                INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
+                SELECT 'job_crawling', cp.id, 'career_page', 5, 'scheduled_populate'
+                FROM career_pages cp
+                WHERE cp.is_active = true
+                  AND NOT EXISTS (
+                    SELECT 1 FROM run_queue rq
+                    WHERE rq.queue_type = 'job_crawling' AND rq.item_id = cp.id
+                      AND rq.status IN ('pending', 'processing')
+                  )
+                ON CONFLICT DO NOTHING
+            """))
+            # discovery: all active sources not already pending
+            r4 = await db.execute(text("""
+                INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
+                SELECT 'discovery', s.id, 'aggregator_source', 5, 'scheduled_populate'
+                FROM aggregator_sources s
+                WHERE s.is_active = true
+                  AND NOT EXISTS (
+                    SELECT 1 FROM run_queue rq
+                    WHERE rq.queue_type = 'discovery' AND rq.item_id = s.id AND rq.status = 'pending'
+                  )
+                ON CONFLICT DO NOTHING
+            """))
             await db.commit()
-            logger.info("Queue population complete")
+            logger.info(f"Queue population complete: +{r1.rowcount} company_config, +{r2.rowcount} site_config, +{r3.rowcount} job_crawling, +{r4.rowcount} discovery")
     _run_async(_run())
 
 

@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # Vision model for Layer 7 screenshot extraction (e.g. "llava:7b").
     # Leave empty to disable the vision layer.
     OLLAMA_VISION_MODEL: Optional[str] = None
+    # Set to False to skip LLM layers in CompanySiteExtractor during bulk processing.
+    COMPANY_SITE_LLM_ENABLED: bool = True
+    # Set to False to skip LLM layers in SiteStructureExtractor during bulk processing.
+    # LLM layers are slow (10-60s per page) and low-yield; disable for initial bulk runs.
+    SITE_STRUCTURE_LLM_ENABLED: bool = True
 
     @property
     def OLLAMA_BASE_URL(self) -> str:

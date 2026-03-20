@@ -32,10 +32,10 @@ celery_app.conf.update(
         "crawl.seed_market_companies": {"queue": "default"},
         "crawl.mark_inactive_jobs": {"queue": "default"},
         "crawl.validate_page_template": {"queue": "default"},
-        "crawl.fix_company_sites": {"queue": "default"},
+        "crawl.fix_company_sites": {"queue": "crawl"},
         "crawl.fix_site_structure": {"queue": "crawl"},
         # Queue drain tasks
-        "queue.drain_company_config": {"queue": "default"},
+        "queue.drain_company_config": {"queue": "crawl"},
         "queue.drain_site_config": {"queue": "crawl"},
         "queue.drain_job_crawling": {"queue": "crawl"},
         "queue.drain_discovery": {"queue": "discovery"},
@@ -64,15 +64,15 @@ celery_app.conf.update(
         # so workers are never idle between batches at scale (50k sites).
         "drain-job-crawling":    {"task": "queue.drain_job_crawling",    "schedule": 5},
         # site_config is one-time per site — moderate drain rate is fine
-        "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 15},
+        "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 10},
         # company_config is one-time per company — infrequent, no rush
-        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 30},
+        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 10},
         # discovery sources
         "drain-discovery":       {"task": "queue.drain_discovery",       "schedule": 60},
         # Populate queues every 2h (safety net — hooks handle real-time adds)
-        "populate-queues": {"task": "queue.populate_queues", "schedule": 2 * 3600},
+        "populate-queues": {"task": "queue.populate_queues", "schedule": 1 * 3600},
         # Safety net: reset items stuck in 'processing' > 2h back to 'pending'
-        "reset-stale-processing": {"task": "queue.reset_stale_processing", "schedule": 30 * 60},
+        "reset-stale-processing": {"task": "queue.reset_stale_processing", "schedule": 15 * 60},
         # DEPRECATED: crawl.scheduled flooded the queue; now handled by drain tasks
         # "scheduled-crawl-cycle": { ... }  ← removed
         # Job lifecycle — mark stale jobs inactive daily

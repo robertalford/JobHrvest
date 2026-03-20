@@ -60,22 +60,25 @@ class SiteStructureExtractor:
             await self._set_status(career_page, STATUS_OK)
             return True
 
-        # Layer 4: LLM fast (3B)
-        if await self._layer_llm(career_page, html, model="qwen2.5:3b"):
-            await self._set_status(career_page, STATUS_OK)
-            return True
+        # Layers 4-6: LLM extraction — only if enabled (disabled during bulk runs for speed)
+        from app.core.config import settings as _settings
+        if getattr(_settings, "SITE_STRUCTURE_LLM_ENABLED", True):
+            # Layer 4: LLM fast (3B)
+            if await self._layer_llm(career_page, html, model="qwen2.5:3b"):
+                await self._set_status(career_page, STATUS_OK)
+                return True
 
-        # Layer 5: LLM full (8B)
-        if await self._layer_llm(career_page, html, model="llama3.1:8b"):
-            await self._set_status(career_page, STATUS_OK)
-            return True
+            # Layer 5: LLM full (8B)
+            if await self._layer_llm(career_page, html, model="llama3.1:8b"):
+                await self._set_status(career_page, STATUS_OK)
+                return True
 
-        # Layer 6: LLM basic field validation — confirm the page contains real job data
-        # even when no repeating listing structure is found (handles individual job detail pages).
-        # Escalates: qwen2.5:3b → llama3.1:8b
-        if await self._layer_llm_field_validation(career_page, html):
-            await self._set_status(career_page, STATUS_OK)
-            return True
+            # Layer 6: LLM basic field validation — confirm the page contains real job data
+            # even when no repeating listing structure is found (handles individual job detail pages).
+            # Escalates: qwen2.5:3b → llama3.1:8b
+            if await self._layer_llm_field_validation(career_page, html):
+                await self._set_status(career_page, STATUS_OK)
+                return True
 
         # All layers failed
         had_structure = career_page.last_extraction_at is not None
