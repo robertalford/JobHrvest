@@ -25,22 +25,22 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_routes={
-        "crawl.company": {"queue": "crawl"},
-        "crawl.career_page": {"queue": "crawl"},
+        "crawl.company": {"queue": "crawl_sites"},
+        "crawl.career_page": {"queue": "crawl_jobs"},
         "crawl.full_cycle": {"queue": "default"},
         "crawl.harvest_aggregators": {"queue": "discovery"},
         "crawl.seed_market_companies": {"queue": "default"},
         "crawl.mark_inactive_jobs": {"queue": "default"},
         "crawl.validate_page_template": {"queue": "default"},
         "crawl.fix_company_sites": {"queue": "company_config"},
-        "crawl.fix_site_structure": {"queue": "crawl"},
+        "crawl.fix_site_structure": {"queue": "crawl_sites"},
         # Queue drain tasks
         "queue.drain_company_config": {"queue": "company_config"},
-        "queue.drain_site_config": {"queue": "crawl"},
-        "queue.drain_job_crawling": {"queue": "crawl"},
+        "queue.drain_site_config": {"queue": "crawl_sites"},
+        "queue.drain_job_crawling": {"queue": "crawl_jobs"},
         "queue.drain_discovery": {"queue": "discovery"},
-        "queue.crawl_career_page_from_queue": {"queue": "crawl"},
-        "queue.drain_job_crawling": {"queue": "crawl"},
+        "queue.crawl_career_page_from_queue": {"queue": "crawl_jobs"},
+        "queue.drain_job_crawling": {"queue": "crawl_jobs"},
         "queue.harvest_aggregator_source": {"queue": "discovery"},
         "queue.populate_queues": {"queue": "default"},
         "ml.*": {"queue": "ml"},
@@ -102,6 +102,12 @@ celery_app.conf.update(
         },
         # Location rescue — fetch individual job pages to fill missing location_raw.
         # Runs every 10 min until backlog is cleared, then becomes a no-op.
+        "score-unscored-jobs": {
+            "task": "crawl.score_unscored_jobs",
+            "schedule": 600,
+            "kwargs": {"batch_size": 2000},
+            "options": {"queue": "default"},
+        },
         "rescue-job-locations": {
             "task": "crawl.rescue_job_locations",
             "schedule": 10 * 60,
