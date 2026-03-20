@@ -74,6 +74,8 @@ celery_app.conf.update(
         "populate-queues": {"task": "queue.populate_queues", "schedule": 1 * 3600},
         # Safety net: reset items stuck in 'processing' > 2h back to 'pending'
         "reset-stale-processing": {"task": "queue.reset_stale_processing", "schedule": 15 * 60},
+        # Auto-rebalance worker queue subscriptions based on live queue depths
+        "rebalance-workers": {"task": "queue.rebalance_workers", "schedule": 3 * 60, "options": {"queue": "default"}},
         # DEPRECATED: crawl.scheduled flooded the queue; now handled by drain tasks
         # "scheduled-crawl-cycle": { ... }  ← removed
         # Job lifecycle — mark stale jobs inactive daily
@@ -85,7 +87,7 @@ celery_app.conf.update(
         "score-jobs-batch": {
             "task": "ml.score_jobs_batch",
             "schedule": 30 * 60,
-            "kwargs": {"limit": 500},
+            "kwargs": {"limit": 100},
             "options": {"queue": "ml"},
         },
         # Description enrichment — every 20 min
@@ -99,7 +101,7 @@ celery_app.conf.update(
         "geocode-new-jobs": {
             "task": "geocoder.geocode_new_jobs",
             "schedule": 30,
-            "kwargs": {"limit": 500},
+            "kwargs": {"limit": 100},
         },
         # Location rescue — fetch individual job pages to fill missing location_raw.
         # Runs every 10 min until backlog is cleared, then becomes a no-op.

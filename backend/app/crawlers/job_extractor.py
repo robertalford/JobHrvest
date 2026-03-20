@@ -672,24 +672,84 @@ class JobExtractor:
         return []
 
     async def _extract_with_template(self, company: Company, career_page: CareerPage, html: str) -> list[dict]:
-        """Stage 3c: Use a learned site template if one exists."""
+        """Stage 3c: Use a learned site template if one exists.
+
+        Handles multiple template types saved by SiteStructureExtractor:
+          - detail_page: TemplateLearner CSS/field selectors for a single job
+          - repeating_block / llm_bootstrapped: CSS selector targeting job list items
+          - llm_field_validated: LLM-extracted fields for a single-job detail page
+        """
         from sqlalchemy import select
         from app.models.site_template import SiteTemplate
-        from app.extractors.template_learner import TemplateLearner
 
         template = await self.db.scalar(
             select(SiteTemplate).where(
                 SiteTemplate.career_page_id == career_page.id,
                 SiteTemplate.is_active == True,
-                SiteTemplate.template_type == "detail_page",
             )
         )
         if not template or not template.selectors:
             return []
 
-        learner = TemplateLearner()
-        result = learner.extract_with_template(html, template.selectors)
-        return [result] if result.get("title") else []
+        tmpl_type = template.template_type
+        selectors = template.selectors or {}
+
+        # detail_page template: TemplateLearner extracts a single job's fields
+        if tmpl_type == "detail_page":
+            from app.extractors.template_learner import TemplateLearner
+            learner = TemplateLearner()
+            result = learner.extract_with_template(html, selectors)
+            return [result] if result.get("title") else []
+
+        # repeating_block / llm_bootstrapped: apply saved CSS selector to find job list items
+        if tmpl_type in ("repeating_block", "llm_bootstrapped"):
+            selector = selectors.get("job_listing_selector", "")
+            if not selector:
+                return []
+            try:
+                from bs4 import BeautifulSoup
+                from urllib.parse import urljoin
+                soup = BeautifulSoup(html, "lxml")
+                elements = soup.select(selector)
+                if len(elements) < 2:
+                    return []
+                jobs = []
+                for el in elements:
+                    link = el.find("a")
+                    title_el = el.find(["h1", "h2", "h3", "h4", "strong", "b"]) or el
+                    title = title_el.get_text(strip=True)[:200]
+                    if not title or len(title) < 5:
+                        continue
+                    job_url = urljoin(career_page.url, link["href"]) if link and link.get("href") else career_page.url
+                    jobs.append({
+                        "title": title,
+                        "source_url": job_url,
+                        "extraction_method": f"template_{tmpl_type}",
+                        "extraction_confidence": float(template.accuracy_score or 0.7),
+                    })
+                if jobs:
+                    logger.info(f"template ({tmpl_type}): {len(jobs)} jobs from {career_page.url}")
+                return jobs
+            except Exception as e:
+                logger.debug(f"Template extraction ({tmpl_type}) failed: {e}")
+                return []
+
+        # llm_field_validated: single-job page with LLM-extracted fields
+        if tmpl_type == "llm_field_validated":
+            title = selectors.get("extracted_title", "")
+            if not title:
+                return []
+            return [{
+                "title": title,
+                "source_url": career_page.url,
+                "location_raw": selectors.get("extracted_location", ""),
+                "description": selectors.get("extracted_description", ""),
+                "employment_type": selectors.get("extracted_employment_type", ""),
+                "extraction_method": "llm_field_validated",
+                "extraction_confidence": 0.65,
+            }]
+
+        return []
 
     async def _extract_llm(self, url: str, html: str) -> list[dict]:
         """Stage 3d: LLM extraction via Ollama."""

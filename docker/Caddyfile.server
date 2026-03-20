@@ -1,18 +1,7 @@
-# JobHarvest — public HTTPS via Let's Encrypt
-# Caddy automatically obtains and renews the TLS certificate.
-# Ensure ports 80 and 443 are forwarded from your router to this server.
-
-jobharvet.alfords.xyz {
-    handle /api/* {
-        reverse_proxy api:8000
-    }
-    handle /* {
-        reverse_proxy frontend:80
-    }
-}
-
-# LAN access on port 9080 (HTTP only, no cert needed)
+# JobHarvest — TLS is handled upstream by Cloudflare + dorcas-caddy (*.alfords.xyz wildcard cert).
+# This instance only needs to serve HTTP on port 9080 (the LAN reverse-proxy target).
 :80 {
+    # API must be matched before the catch-all
     handle /api/* {
         reverse_proxy api:8000
     }

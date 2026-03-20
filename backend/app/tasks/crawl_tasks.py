@@ -784,17 +784,39 @@ def harvest_aggregator_source(self, source_id: str, queue_item_id: str):
 
 @celery_app.task(name="queue.reset_stale_processing")
 def reset_stale_processing():
-    """Reset run_queue items stuck in 'processing' > 2 hours back to 'pending'.
-    Runs every 30 min as a safety net for tasks that died without completing."""
+    """Delete run_queue items stuck in 'processing' > 30 min, then flush matching Redis queues.
+
+    Tasks that die mid-execution (worker restart, SIGKILL) leave DB rows in 'processing'
+    AND leave their payloads re-queued in Redis (task_acks_late=True).  When new workers
+    pick up those stale Redis tasks the queue_item_id no longer matches any DB row, so
+    queue_manager.complete() silently updates 0 rows — completions are lost.
+    Flushing the Redis queue forces the drain to re-dispatch with fresh, valid IDs.
+    Runs every 15 min (beat schedule).
+    """
+    import redis as _redis
+    from app.core.config import settings
+
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            count = await queue_manager.reset_stale_processing(db, stale_after_minutes=120)
+            count = await queue_manager.reset_stale_processing(db, stale_after_minutes=30)
             await db.commit()
-            if count:
-                logger.warning(f"reset_stale_processing: reset {count} stuck items → pending")
-    _run_async(_run())
+            return count
+
+    count = _run_async(_run())
+    if not count:
+        return
+
+    logger.warning(f"reset_stale_processing: deleted {count} stale items — flushing Redis queues")
+    # Flush all work queues so stale Redis tasks (which have dead queue_item_ids) don't
+    # continue running and silently failing to update the DB.
+    try:
+        r = _redis.from_url(settings.CELERY_BROKER_URL, socket_timeout=5)
+        flushed = {q: r.delete(q) for q in ("company_config", "crawl_sites", "crawl_jobs", "crawl")}
+        logger.warning(f"reset_stale_processing: flushed Redis queues: {flushed}")
+    except Exception as exc:
+        logger.error(f"reset_stale_processing: Redis flush failed: {exc}")
 
 
 @celery_app.task(name="queue.populate_queues")
@@ -1077,3 +1099,100 @@ def score_unscored_jobs(self, batch_size: int = 2000):
 
     return _run_async(_run())
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker rebalancer — dynamically adjusts queue subscriptions based on backlog
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Overflow queues: dynamically added to flex workers when their Redis depth
+# exceeds the high threshold, removed when depth falls below the low threshold.
+# "Flex" workers = all registered workers except those with 'ml' or 'company'
+# in their hostname (those have dedicated roles that should not be disrupted).
+_REBALANCE_OVERFLOW: dict[str, tuple[int, int]] = {
+    # (add_when_depth_above, remove_when_depth_below)
+    "company_config": (200, 20),
+    "geocoder": (300, 30),
+}
+
+
+@celery_app.task(name="queue.rebalance_workers")
+def rebalance_workers():
+    """Automatically add/remove queue consumers on flex workers based on live queue depths.
+
+    Scheduled every 3 minutes via beat.  Logic per overflow queue:
+      - depth > high threshold → add_consumer on flex workers not already serving it.
+      - depth <= low threshold → cancel_consumer on flex workers currently serving it.
+    Dedicated workers (hostname contains 'ml' or 'company') are never touched.
+    """
+    import redis as _redis_lib
+    from app.core.config import settings
+
+    # ── 1. Measure Redis queue depths ────────────────────────────────────────
+    try:
+        r = _redis_lib.from_url(settings.CELERY_BROKER_URL, socket_timeout=5)
+        depths: dict[str, int] = {q: (r.llen(q) or 0) for q in _REBALANCE_OVERFLOW}
+    except Exception as exc:
+        logger.error("rebalance_workers: failed to read Redis depths: %s", exc)
+        return
+
+    logger.info("rebalance_workers: queue depths = %s", depths)
+
+    # ── 2. Discover current worker → active-queues mapping ───────────────────
+    try:
+        inspection = celery_app.control.inspect(timeout=8)
+        active_queues_map: dict[str, list[dict]] = inspection.active_queues() or {}
+    except Exception as exc:
+        logger.error("rebalance_workers: inspect failed: %s", exc)
+        return
+
+    if not active_queues_map:
+        logger.warning("rebalance_workers: no workers responded to inspect")
+        return
+
+    flex_workers = [
+        hostname for hostname in active_queues_map
+        if "ml" not in hostname and "company" not in hostname
+    ]
+
+    if not flex_workers:
+        logger.warning("rebalance_workers: no flex workers found")
+        return
+
+    # ── 3. Apply threshold-based add/remove decisions ────────────────────────
+    changes: list[str] = []
+
+    for queue, (add_thresh, remove_thresh) in _REBALANCE_OVERFLOW.items():
+        depth = depths.get(queue, 0)
+
+        serving = [
+            h for h in flex_workers
+            if any(q.get("name") == queue for q in (active_queues_map.get(h) or []))
+        ]
+        not_serving = [h for h in flex_workers if h not in serving]
+
+        if depth > add_thresh and not_serving:
+            for h in not_serving:
+                try:
+                    celery_app.control.add_consumer(queue, destination=[h], reply=False)
+                except Exception as exc:
+                    logger.warning("rebalance_workers: add_consumer %s→%s failed: %s", queue, h, exc)
+            changes.append(
+                f"ADD {queue} to {len(not_serving)} workers (depth={depth})"
+            )
+        elif depth <= remove_thresh and serving:
+            for h in serving:
+                try:
+                    celery_app.control.cancel_consumer(queue, destination=[h], reply=False)
+                except Exception as exc:
+                    logger.warning("rebalance_workers: cancel_consumer %s←%s failed: %s", queue, h, exc)
+            changes.append(
+                f"REMOVE {queue} from {len(serving)} workers (depth={depth})"
+            )
+
+    if changes:
+        logger.info("rebalance_workers applied: %s", " | ".join(changes))
+    else:
+        logger.debug("rebalance_workers: no changes needed (depths=%s)", depths)
+
+    return {"depths": depths, "changes": changes}

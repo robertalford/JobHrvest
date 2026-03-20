@@ -250,7 +250,7 @@ async def _seed_one(country_code: str, market_code: str) -> dict:
 # TASK: geocode_new_jobs  (beat: every 2 min)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@celery_app.task(name="geocoder.geocode_new_jobs", bind=True, time_limit=300)
+@celery_app.task(name="geocoder.geocode_new_jobs", bind=True, time_limit=600)
 def geocode_new_jobs(self, limit: int = 200):
     """Geocode recently-crawled jobs that have geo_resolved IS NULL."""
     return _run(_geocode_batch(limit=limit, include_failed=False))
@@ -351,7 +351,7 @@ async def _geocode_batch(limit: int, include_failed: bool) -> dict:
         for job_id, loc_raw, loc_city, loc_state, loc_country, market_code in rows:
             # Build best available location string
             loc_text = loc_raw or ", ".join(
-                filter(None, [loc_city, loc_state, loc_country])
+                filter(None, [loc_city, loc_state])
             ) or None
 
             if not loc_text:
@@ -401,6 +401,9 @@ async def _geocode_batch(limit: int, include_failed: bool) -> dict:
                     stats["failed"] += 1
 
             stats["processed"] += 1
+            # Commit every 50 jobs so progress is visible and locks are released sooner
+            if stats["processed"] % 50 == 0:
+                await db.commit()
 
         await db.commit()
 

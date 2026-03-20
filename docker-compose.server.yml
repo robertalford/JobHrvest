@@ -203,7 +203,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs --prefetch-multiplier=1 --hostname=worker4@%h
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs,crawl_sites,company_config,discovery,default,celery --prefetch-multiplier=1 --hostname=worker4@%h
 
   celery-worker-5:
     build:
@@ -225,7 +225,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs --prefetch-multiplier=1 --hostname=worker5@%h
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs,crawl_sites,company_config,discovery,default,celery --prefetch-multiplier=1 --hostname=worker5@%h
 
   celery-worker-6:
     build:
@@ -247,7 +247,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs --prefetch-multiplier=1 --hostname=worker6@%h
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q crawl_jobs,crawl_sites,company_config,discovery,default,celery --prefetch-multiplier=1 --hostname=worker6@%h
 
   # ML worker — LLM inference tasks (70B model, controlled concurrency)
   celery-worker-ml:
@@ -293,7 +293,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=16 -Q company_config,default --prefetch-multiplier=1 --hostname=worker-company@%h
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-16} -Q company_config,default --prefetch-multiplier=1 --hostname=worker-company@%h
 
   celery-beat:
     build:

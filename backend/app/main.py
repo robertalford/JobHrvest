@@ -2,15 +2,38 @@
 
 from contextlib import asynccontextmanager
 import logging
+from typing import Callable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import settings
 from app.api.v1.router import api_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class StripTrailingSlashMiddleware:
+    """ASGI middleware that strips trailing slashes from request paths.
+
+    Avoids FastAPI's automatic 307 redirect which produces an http:// Location
+    when running behind an HTTPS reverse proxy, causing browser CORS failures.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            path: str = scope.get("path", "/")
+            if path != "/" and path.endswith("/"):
+                scope = dict(scope)
+                scope["path"] = path.rstrip("/")
+                if "raw_path" in scope:
+                    scope["raw_path"] = scope["path"].encode("utf-8")
+        await self.app(scope, receive, send)
 
 
 @asynccontextmanager
@@ -29,7 +52,10 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
     docs_url=f"{settings.API_V1_PREFIX}/docs",
     lifespan=lifespan,
+    redirect_slashes=False,
 )
+
+app.add_middleware(StripTrailingSlashMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

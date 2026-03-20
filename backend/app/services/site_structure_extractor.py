@@ -244,16 +244,36 @@ class SiteStructureExtractor:
             return False
 
     async def _layer_repeating_blocks(self, career_page, html: str) -> bool:
-        """Layer 2: Find repeating DOM blocks that likely contain job listings."""
+        """Layer 2: Find repeating DOM blocks that likely contain job listings.
+
+        False-positive prevention:
+          - Strips nav/header/footer before analysis so menus don't match.
+          - Requires at least 5 matching elements (raises from old threshold of 3).
+          - Requires ≥70% of elements to contain a link (job cards almost always link
+            to detail pages; nav items often don't link to detail pages in this pattern).
+          - Requires minimum text length of 40 chars per element (nav items are short).
+          - Requires a majority (≥4 of 8 sampled) to contain strong or multiple weak
+            job-listing signals.
+        """
         try:
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, 'lxml')
 
-            # Find elements that repeat with similar structure
-            # Strategy: count siblings with the same tag + class combination
+            # Remove chrome/navigation so we don't accidentally match menus, footers, etc.
+            for tag in soup(["nav", "header", "footer", "script", "style", "noscript"]):
+                tag.decompose()
+
+            # Strong signals = keywords highly specific to job listings
+            STRONG_SIGNALS = frozenset([
+                'full-time', 'part-time', 'contract', 'permanent',
+                'salary', 'qualifications', 'responsibilities', 'requirements',
+                'benefits', 'hybrid', 'deadline', 'closing date',
+            ])
+            # Weak signals = common on job pages but also elsewhere
+            WEAK_SIGNALS = frozenset(['apply', 'location', 'remote', 'experience', 'role', 'position'])
+
             best_selector = None
             best_count = 0
-            best_sample = None
 
             for tag in ['li', 'div', 'article', 'tr']:
                 # Group elements by their parent + class fingerprint
@@ -266,23 +286,37 @@ class SiteStructureExtractor:
                         groups.setdefault(key, []).append(el)
 
                 for key, elements in groups.items():
-                    if len(elements) < 3:
+                    if len(elements) < 5:
                         continue
-                    # Check if these blocks look like job listings
-                    job_signals = 0
-                    for el in elements[:5]:
-                        text = el.get_text().lower()
-                        job_signals += sum(1 for kw in ['apply', 'location', 'full-time', 'part-time',
-                                                         'contract', 'remote', 'experience'] if kw in text)
-                    if job_signals >= 3 and len(elements) > best_count:
+
+                    # Require that most elements contain a link — job cards link to detail pages
+                    elements_with_links = [el for el in elements if el.find('a')]
+                    if len(elements_with_links) / len(elements) < 0.7:
+                        continue
+
+                    # Score each of the first 8 elements individually
+                    job_like_count = 0
+                    for el in elements[:8]:
+                        text = el.get_text()
+                        # Skip very short elements (nav items, tag badges, etc.)
+                        if len(text.strip()) < 40:
+                            continue
+                        text_lower = text.lower()
+                        strong = sum(1 for kw in STRONG_SIGNALS if kw in text_lower)
+                        weak = sum(1 for kw in WEAK_SIGNALS if kw in text_lower)
+                        # Element looks job-like: 1 strong signal OR 3+ weak signals
+                        if strong >= 1 or weak >= 3:
+                            job_like_count += 1
+
+                    # Require majority (≥4 of 8 sampled) to look like job listings
+                    if job_like_count >= 4 and len(elements) > best_count:
                         best_count = len(elements)
                         best_selector = key
-                        best_sample = elements[0]
 
-            if not best_selector or best_count < 3:
+            if not best_selector or best_count < 5:
                 return False
 
-            # Build CSS selector from the first element
+            # Build CSS selector from the winning key
             parts = best_selector.split('>')
             classes = parts[-1].split('.')
             tag_name = classes[0].split(' ')[0].strip()
@@ -360,7 +394,7 @@ class SiteStructureExtractor:
                 f"Page HTML excerpt:\n{html_excerpt}\n\nJSON:"
             )
 
-            async with httpx.AsyncClient(timeout=90) as http:
+            async with httpx.AsyncClient(timeout=30) as http:
                 r = await http.post(ollama_url, json={
                     "model": model,
                     "prompt": prompt,
@@ -383,7 +417,7 @@ class SiteStructureExtractor:
             logger.info(f"LLM ({model}) found structure for {career_page.url}")
             return True
         except Exception as e:
-            logger.debug(f"LLM layer ({model}) failed: {e}")
+            logger.warning(f"LLM layer ({model}) failed for {career_page.url}: {e}")
             return False
 
     async def _save_template(self, career_page, template_type: str, selectors: dict, accuracy: float):
@@ -477,7 +511,7 @@ class SiteStructureExtractor:
                 f"Page content:\n{md}\n\nJSON:"
             )
 
-            async with httpx.AsyncClient(timeout=90) as http:
+            async with httpx.AsyncClient(timeout=30) as http:
                 r = await http.post(
                     ollama_url,
                     json={
@@ -488,7 +522,7 @@ class SiteStructureExtractor:
                     },
                 )
                 if r.status_code != 200:
-                    logger.debug(f"LLM field validation: Ollama returned {r.status_code} for {model}")
+                    logger.warning(f"LLM field validation: Ollama returned {r.status_code} for {model}")
                     return False
                 raw = r.json().get("response", "").strip()
 
@@ -529,7 +563,7 @@ class SiteStructureExtractor:
             return True
 
         except Exception as e:
-            logger.debug(f"LLM field validation ({model}) failed for {career_page.url}: {e}")
+            logger.warning(f"LLM field validation ({model}) failed for {career_page.url}: {e}")
             return False
 
     async def _set_status(self, career_page, status: str):
