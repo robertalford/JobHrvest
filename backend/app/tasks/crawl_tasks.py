@@ -881,9 +881,16 @@ def populate_queues():
                 ON CONFLICT DO NOTHING
             """))
             # site_config: non-ok sites not already pending
+            # Priority: 1 = company has NO ok pages (critical), 8 = company already has ok pages (low priority)
             r2 = await db.execute(text("""
                 INSERT INTO run_queue (queue_type, item_id, item_type, priority, added_by)
-                SELECT 'site_config', cp.id, 'career_page', 5, 'scheduled_populate'
+                SELECT 'site_config', cp.id, 'career_page',
+                    CASE WHEN EXISTS(
+                        SELECT 1 FROM career_pages cp2
+                        WHERE cp2.company_id = cp.company_id AND cp2.site_status = 'ok'
+                          AND cp2.is_active = true AND cp2.id != cp.id
+                    ) THEN 8 ELSE 1 END,
+                    'scheduled_populate'
                 FROM career_pages cp
                 WHERE cp.is_active = true AND cp.site_status != 'ok'
                   AND NOT EXISTS (
@@ -1238,3 +1245,44 @@ def rebalance_workers():
         logger.debug("rebalance_workers: no changes needed (depths=%s)", depths)
 
     return {"depths": depths, "changes": changes}
+
+
+@celery_app.task(name="queue.deactivate_empty_pages")
+def deactivate_empty_pages():
+    """Deactivate career pages that have been crawled 3+ times with 0 jobs.
+
+    These pages are confirmed to not yield jobs — continuing to crawl them
+    wastes capacity. Pages can be reactivated manually if needed.
+    Runs every 6 hours.
+    """
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(text("""
+                UPDATE career_pages SET is_active = false
+                WHERE is_active = true
+                  AND site_status = 'ok'
+                  AND last_crawled_at IS NOT NULL
+                  AND id IN (
+                      -- Pages crawled 3+ times (3+ done queue items) with 0 jobs
+                      SELECT cp.id
+                      FROM career_pages cp
+                      LEFT JOIN jobs j ON j.career_page_id = cp.id
+                      WHERE cp.is_active = true AND cp.site_status = 'ok'
+                        AND cp.last_crawled_at IS NOT NULL
+                      GROUP BY cp.id
+                      HAVING COUNT(j.id) = 0
+                        AND (
+                            SELECT COUNT(*) FROM run_queue rq
+                            WHERE rq.item_id = cp.id
+                              AND rq.queue_type = 'job_crawling'
+                              AND rq.status = 'done'
+                        ) >= 3
+                  )
+            """))
+            deactivated = result.rowcount
+            await db.commit()
+            if deactivated:
+                logger.info(f"Deactivated {deactivated} empty career pages (crawled 3+ times, 0 jobs)")
+    _run_async(_run())

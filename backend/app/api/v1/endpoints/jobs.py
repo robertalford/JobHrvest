@@ -142,7 +142,7 @@ def _apply_job_filters(q, *, search, company_id, location_country, location_city
     return q
 
 
-@router.get("/")
+@router.get("")
 async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),

@@ -13,7 +13,7 @@ from app.models.excluded_site import ExcludedSite
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def list_excluded_sites(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -80,7 +80,7 @@ async def excluded_site_stats(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def add_excluded_site(
     payload: dict,
     db: AsyncSession = Depends(get_db),

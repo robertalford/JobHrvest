@@ -10,7 +10,6 @@ from app.models.aggregator_source import AggregatorSource
 router = APIRouter()
 
 
-@router.get("/")
 @router.get("")
 async def list_sources(
     page: int = Query(1, ge=1),
@@ -48,7 +47,6 @@ async def list_sources(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@router.post("/", status_code=201)
 @router.post("", status_code=201)
 async def create_source(body: dict, db: AsyncSession = Depends(get_db)):
     source = AggregatorSource(

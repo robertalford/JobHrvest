@@ -75,7 +75,6 @@ async def _build_path(db: AsyncSession, geo_id, name: str, parent_id) -> str:
 
 # ── locations list ────────────────────────────────────────────────────────────
 
-@router.get("/")
 @router.get("")
 async def list_geo_locations(
     search: Optional[str] = Query(None),

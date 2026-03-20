@@ -126,7 +126,7 @@ _SITES_SELECT = """
 """
 
 
-@router.get("/")
+@router.get("")
 async def list_career_pages(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),

@@ -57,7 +57,7 @@ async def _cache_invalidate_companies() -> None:
         pass
 
 
-@router.get("/")
+@router.get("")
 async def list_companies(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -210,7 +210,7 @@ async def export_companies(
     )
 
 
-@router.post("/", response_model=CompanyRead, status_code=201)
+@router.post("", response_model=CompanyRead, status_code=201)
 async def create_company(payload: CompanyCreate, db: AsyncSession = Depends(get_db)):
     from urllib.parse import urlparse
     domain = urlparse(str(payload.root_url)).netloc.lstrip("www.")

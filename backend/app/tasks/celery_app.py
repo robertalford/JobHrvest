@@ -83,6 +83,11 @@ celery_app.conf.update(
             "task": "crawl.mark_inactive_jobs",
             "schedule": 24 * 3600,
         },
+        # Deactivate career pages that consistently yield 0 jobs (3+ crawls)
+        "deactivate-empty-pages": {
+            "task": "queue.deactivate_empty_pages",
+            "schedule": 6 * 3600,
+        },
         # Quality scoring backfill — every 30 min for newly crawled jobs
         "score-jobs-batch": {
             "task": "ml.score_jobs_batch",

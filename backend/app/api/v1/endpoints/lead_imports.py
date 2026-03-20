@@ -490,7 +490,7 @@ async def lead_import_summary(db: AsyncSession = Depends(get_db)):
     return {"total": total, "by_status": by_status, "by_country": by_country, "by_category": by_category}
 
 
-@router.get("/")
+@router.get("")
 async def list_lead_imports(
     db: AsyncSession = Depends(get_db),
     country: Optional[str] = Query(None),
