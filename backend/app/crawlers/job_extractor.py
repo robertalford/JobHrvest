@@ -86,6 +86,76 @@ class JobExtractor:
                     seen_urls.add(url_key)
                     all_jobs_data.append(job_data)
 
+        # ── Detail page enrichment pass ──────────────────────────────────
+        # For jobs extracted from listing pages that have a detail URL but
+        # missing location or short description — fetch the detail page in
+        # parallel to fill the gaps BEFORE persisting.
+        import asyncio as _aio
+
+        async def _enrich_from_detail(job_data: dict) -> dict:
+            src = job_data.get("source_url", "")
+            has_loc = bool(job_data.get("location_raw"))
+            has_desc = bool(job_data.get("description")) and len(job_data.get("description", "")) >= 100
+            # Skip if already complete or URL is the listing page itself
+            if (has_loc and has_desc) or not src or src == career_page.url:
+                return job_data
+            try:
+                resp = await self.client.get(src, timeout=12)
+                if not resp or resp.status_code != 200:
+                    return job_data
+                detail_html = resp.text
+                # Extract structured data from detail page
+                detail_jobs = self._extract_structured_data(detail_html, src)
+                detail = detail_jobs[0] if detail_jobs else {}
+                # Fill location
+                if not has_loc:
+                    loc = detail.get("location_raw", "")
+                    if not loc:
+                        h = self._extract_heuristic_single_job(detail_html, src)
+                        if h:
+                            loc = h[0].get("location_raw", "") if isinstance(h, list) and h else (h.get("location_raw", "") if isinstance(h, dict) else "")
+                    if loc and loc.strip().lower() not in self._GARBAGE_LOCATIONS:
+                        job_data["location_raw"] = loc
+                        job_data["location_city"] = job_data.get("location_city") or detail.get("location_city")
+                        job_data["location_state"] = job_data.get("location_state") or detail.get("location_state")
+                        job_data["location_country"] = job_data.get("location_country") or detail.get("location_country")
+                # Fill description
+                if not has_desc:
+                    desc = detail.get("description", "")
+                    if not desc or len(desc) < 100:
+                        from markdownify import markdownify as _md
+                        try:
+                            desc = _md(detail_html[:12000], strip=["script","style","nav","header","footer"])[:5000].strip()
+                        except Exception:
+                            pass
+                    if desc and len(desc) > len(job_data.get("description") or ""):
+                        job_data["description"] = desc
+                # Fill employment type
+                if not job_data.get("employment_type") and detail.get("employment_type"):
+                    job_data["employment_type"] = detail["employment_type"]
+            except Exception:
+                pass
+            return job_data
+
+        # Run detail enrichment in parallel (max 20 concurrent)
+        _detail_sem = _aio.Semaphore(20)
+        async def _enrich_with_sem(jd):
+            async with _detail_sem:
+                return await _enrich_from_detail(jd)
+
+        needs_enrichment = [jd for jd in all_jobs_data
+                           if (not jd.get("location_raw") or not jd.get("description") or len(jd.get("description","")) < 100)
+                           and jd.get("source_url") and jd.get("source_url") != career_page.url]
+
+        if needs_enrichment:
+            logger.info(f"Detail enrichment: fetching {len(needs_enrichment)} detail pages for {career_page.url}")
+            enriched = await _aio.gather(*[_enrich_with_sem(jd) for jd in needs_enrichment])
+            # Merge back
+            enriched_map = {jd.get("source_url"): jd for jd in enriched}
+            for i, jd in enumerate(all_jobs_data):
+                if jd.get("source_url") in enriched_map:
+                    all_jobs_data[i] = enriched_map[jd["source_url"]]
+
         # Persist jobs
         saved = []
         for job_data in all_jobs_data:
