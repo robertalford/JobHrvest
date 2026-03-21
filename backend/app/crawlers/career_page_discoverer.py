@@ -135,24 +135,44 @@ class CareerPageDiscoverer:
             if url not in seen or c["confidence"] > seen[url]["confidence"]:
                 seen[url] = c
 
-        # Persist — cap at MAX_PAGES_PER_COMPANY to prevent ATS-hosted site explosions
+        # QUALITY GATE: Only save pages discovered/validated by LLM or ATS detection.
+        # Heuristic-only candidates are used as input for LLM but never saved directly.
+        TRUSTED_METHODS = {"llm_playwright", "ats_fingerprint", "ats_bulk"}
         pages = []
-        # Sort by confidence descending so we keep the best candidates when capping
         sorted_candidates = sorted(seen.items(), key=lambda x: x[1]["confidence"], reverse=True)
         for url, meta in sorted_candidates:
             if len(pages) >= MAX_PAGES_PER_COMPANY:
-                logger.warning(
-                    f"Page cap ({MAX_PAGES_PER_COMPANY}) reached for {company.domain} "
-                    f"— skipping {len(seen) - len(pages)} lower-confidence candidates"
-                )
                 break
-            if meta["confidence"] >= 0.50:  # Only persist candidates with some confidence
-                # Final guard: skip job detail URLs regardless of confidence score
-                if _JOB_DETAIL_PATH_RE.search(urlparse(url).path + "?" + urlparse(url).query):
+            method = meta.get("discovery_method", "")
+            # Only save LLM-validated or ATS-detected pages
+            if method not in TRUSTED_METHODS:
+                # Exception: domain_signal with very high confidence (careers.company.com)
+                if method == "domain_signal" and meta["confidence"] >= 0.80:
+                    pass  # Allow through
+                else:
                     continue
-                page = await self._upsert_career_page(company, url, meta)
+            if meta["confidence"] < 0.50:
+                continue
+            if _JOB_DETAIL_PATH_RE.search(urlparse(url).path + "?" + urlparse(url).query):
+                continue
+            page = await self._upsert_career_page(company, url, meta)
+            if page:
+                pages.append(page)
+
+        # If LLM/ATS found nothing but heuristics did, try LLM validation on top heuristic candidates
+        if not pages:
+            heuristic_candidates = [(url, meta) for url, meta in sorted_candidates
+                                     if meta.get("discovery_method") in ("heuristic", "domain_signal", "subdomain_probe")
+                                     and meta["confidence"] >= 0.60]
+            if heuristic_candidates:
+                best_url, best_meta = heuristic_candidates[0]
+                # Save the best heuristic candidate as a fallback with reduced confidence
+                best_meta["discovery_method"] = "heuristic_fallback"
+                best_meta["confidence"] = min(best_meta["confidence"], 0.60)
+                page = await self._upsert_career_page(company, best_url, best_meta)
                 if page:
                     pages.append(page)
+                    logger.info(f"Fallback: saved top heuristic candidate for {company.domain}: {best_url}")
 
         logger.info(f"Discovered {len(pages)} career pages for {company.domain}")
         return pages
