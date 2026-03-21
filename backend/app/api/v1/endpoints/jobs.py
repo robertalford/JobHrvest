@@ -368,7 +368,7 @@ async def job_crawl_breakdown(
             COUNT(*) FILTER (WHERE is_active AND {PASS_GATE}) AS live_jobs
         FROM jobs
         WHERE created_at BETWEEN :from_dt AND :to_dt
-    """), {{"from_dt": f, "to_dt": t}})
+    """), {"from_dt": f, "to_dt": t})
     r = result.one()
 
     # Quality breakdown of live (passing) jobs — richness bands
@@ -384,7 +384,7 @@ async def job_crawl_breakdown(
     """))
     q = quality_result.one()
 
-    return {{
+    return {
         "total_extracted": r.total_extracted,
         "failed_core_fields": r.failed_core_fields,
         "failed_bad_words": r.failed_bad_words,
@@ -392,14 +392,14 @@ async def job_crawl_breakdown(
         "failed_expired": r.failed_expired,
         "failed_scam": r.failed_scam,
         "live_jobs": r.live_jobs,
-        "quality_breakdown": {{
-            "A_complete": {{"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)}},
-            "B_good": {{"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)}},
-            "C_fair": {{"count": q.quality_c, "pct": round(100 * q.quality_c / max(q.total_live, 1), 1)}},
-            "D_poor": {{"count": q.quality_d, "pct": round(100 * q.quality_d / max(q.total_live, 1), 1)}},
+        "quality_breakdown": {
+            "A_complete": {"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)},
+            "B_good": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
+            "C_fair": {"count": q.quality_c, "pct": round(100 * q.quality_c / max(q.total_live, 1), 1)},
+            "D_poor": {"count": q.quality_d, "pct": round(100 * q.quality_d / max(q.total_live, 1), 1)},
             "total": q.total_live,
-        }}
-    }}
+        }
+    }
 
 @router.get("/description-audit")
 async def description_audit(db: AsyncSession = Depends(get_db)):
