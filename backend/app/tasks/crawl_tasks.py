@@ -669,7 +669,7 @@ def drain_company_config():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=60)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=20)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]
@@ -1873,7 +1873,7 @@ def drain_llm_unified():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=6)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=2)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]

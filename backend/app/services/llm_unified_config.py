@@ -72,7 +72,7 @@ class LLMUnifiedConfig:
                 if company.domain in urlparse(abs_url).netloc:
                     links.append(f"[{text}]({abs_url})")
 
-        links_text = "\n".join(links[:80])
+        links_text = "\n".join(links[:30])
 
         find_url_prompt = (
             f"You are analyzing a company website to find their careers/jobs page.\n"
@@ -119,8 +119,8 @@ class LLMUnifiedConfig:
             return result
 
         # ── Step 4: Ask LLM to map job listing structure with all 4 core fields
-        career_md = markdownify(career_html[:12000], strip=["script", "style"])
-        career_html_excerpt = career_html[:6000]
+        career_md = markdownify(career_html[:3000], strip=["script", "style"])
+        career_html_excerpt = career_html[:2000]
 
         map_prompt = (
             f"Analyze this careers/jobs page and identify the structure of job listings.\n"
@@ -144,7 +144,7 @@ class LLMUnifiedConfig:
             f"IMPORTANT: All 4 required fields (job_title, location, description, detail_link) "
             f"must be identifiable. If any are missing, return {{}}.\n\n"
             f"HTML excerpt:\n{career_html_excerpt}\n\n"
-            f"Page text:\n{career_md[:3000]}\n\nJSON:"
+            f"Page text:\n{career_md[:1500]}\n\nJSON:"
         )
 
         mapping_raw = await self._ask_llm(map_prompt, max_tokens=500)
