@@ -1002,12 +1002,18 @@ def rescue_job_locations(self, limit: int = 300):
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
+            # Fetch jobs missing location OR with short descriptions
+            from sqlalchemy import or_, func
             jobs = list(await db.scalars(
                 select(Job)
                 .where(
                     Job.is_active == True,
-                    Job.location_raw.is_(None),
                     Job.source_url.isnot(None),
+                    or_(
+                        Job.location_raw.is_(None),
+                        func.length(Job.description) < 200,
+                        Job.description.is_(None),
+                    ),
                 )
                 .order_by(Job.first_seen_at.desc())
                 .limit(limit)
@@ -1084,6 +1090,27 @@ def rescue_job_locations(self, limit: int = 300):
                         updated += 1
                         job.quality_score = None
                         job.quality_scored_at = None
+
+                    # Also fill description from detail page if current is short/missing
+                    if found or (resp and resp.status_code == 200):
+                        # Enrich description if short
+                        if not job.description or len(job.description) < 200:
+                            new_desc = found.get("description", "") if found else ""
+                            if not new_desc and resp and resp.status_code == 200:
+                                # Extract description from full page HTML
+                                from markdownify import markdownify
+                                try:
+                                    md = markdownify(html[:10000], strip=["script", "style", "nav", "header", "footer"])
+                                    if len(md) > 200:
+                                        new_desc = md[:5000].strip()
+                                except Exception:
+                                    pass
+                            if new_desc and len(new_desc) > len(job.description or ""):
+                                job.description = new_desc[:5000]
+                                job.description_enriched_at = datetime.now(timezone.utc)
+                                job.quality_score = None
+                                job.quality_scored_at = None
+                                updated += 1
 
                     # Also fill employment_type from page extraction if missing
                     if found:
