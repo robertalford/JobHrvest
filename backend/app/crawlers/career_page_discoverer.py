@@ -128,16 +128,24 @@ class CareerPageDiscoverer:
         llm_results = await self._llm_discovery(company)
         candidates.extend(llm_results)
 
-        # Deduplicate by URL (keep highest confidence)
+        # Deduplicate by URL — LLM/ATS always wins over heuristic
+        TRUSTED = {"llm_playwright", "ats_fingerprint", "ats_bulk"}
         seen: dict[str, dict] = {}
         for c in candidates:
             url = c["url"]
-            if url not in seen or c["confidence"] > seen[url]["confidence"]:
+            if url not in seen:
                 seen[url] = c
+            else:
+                existing = seen[url]
+                new_trusted = c.get("discovery_method") in TRUSTED
+                old_trusted = existing.get("discovery_method") in TRUSTED
+                # LLM/ATS always overrides heuristic; otherwise keep higher confidence
+                if (new_trusted and not old_trusted) or c["confidence"] > existing["confidence"]:
+                    seen[url] = c
 
         # QUALITY GATE: Only save pages discovered/validated by LLM or ATS detection.
         # Heuristic-only candidates are used as input for LLM but never saved directly.
-        TRUSTED_METHODS = {"llm_playwright", "ats_fingerprint", "ats_bulk"}
+        TRUSTED_METHODS = {"llm_playwright", "ats_fingerprint", "ats_bulk", "domain_signal"}
         pages = []
         sorted_candidates = sorted(seen.items(), key=lambda x: x[1]["confidence"], reverse=True)
         for url, meta in sorted_candidates:
