@@ -2,7 +2,7 @@
  * Monitor Runs Overview — one-page summary of all 4 run-type queues
  * with date range filtering and jobs crawled breakdown.
  */
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getQueueStats, getJobCrawlBreakdown, triggerRun, resetStaleQueueItems } from '../../lib/api';
 import { Link } from 'react-router-dom';
@@ -264,7 +264,7 @@ export function MonitorRunsOverview() {
   }), [range]);
 
   // Queue stats (filtered by date range)
-  const { data: queueStats, isLoading } = useQuery<Record<string, Record<string, number>>>({
+  const { data: queueStats, isLoading, dataUpdatedAt } = useQuery<Record<string, Record<string, number>>>({
     queryKey: ['queue-stats', rangeParams],
     queryFn: () => getQueueStats(rangeParams),
     refetchInterval: 5000,
@@ -274,8 +274,29 @@ export function MonitorRunsOverview() {
   const { data: crawlBreakdown, isLoading: crawlLoading } = useQuery<CrawlBreakdownData>({
     queryKey: ['job-crawl-breakdown', rangeParams],
     queryFn: () => getJobCrawlBreakdown(rangeParams),
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
+
+  // Auto-refresh countdown
+  const REFRESH_INTERVAL = 5;
+  const [countdown, setCountdown] = useState(REFRESH_INTERVAL);
+  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
+
+  // Reset countdown when data refreshes
+  useEffect(() => {
+    if (dataUpdatedAt) {
+      setCountdown(REFRESH_INTERVAL);
+      setLastUpdated(new Date());
+    }
+  }, [dataUpdatedAt]);
+
+  // Tick countdown every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown(prev => (prev <= 1 ? REFRESH_INTERVAL : prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const resetStaleMut = useMutation({
     mutationFn: () => resetStaleQueueItems(120),
@@ -326,6 +347,15 @@ export function MonitorRunsOverview() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Monitor Runs</h1>
             <p className="text-sm text-gray-500">Live overview of all pipeline queues</p>
+            <div className="flex items-center gap-4 mt-0.5">
+              <span className="text-xs text-gray-400">
+                Last updated: {lastUpdated.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })} - {lastUpdated.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+              <span className="text-xs text-gray-300">·</span>
+              <span className="text-xs text-gray-400">
+                Next update in <span className="font-mono font-medium text-gray-500">{countdown}s</span>
+              </span>
+            </div>
           </div>
         </div>
         <button
