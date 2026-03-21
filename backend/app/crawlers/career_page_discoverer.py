@@ -123,6 +123,12 @@ class CareerPageDiscoverer:
         heuristic_results = await self._heuristic_discovery(company.root_url, company.domain)
         candidates.extend(heuristic_results)
 
+        # 2d: LLM-powered discovery — Playwright renders the site, LLM identifies job listing pages
+        # This catches pages that heuristic BFS misses (JS-rendered navs, non-standard URL patterns)
+        if not any(c["confidence"] >= 0.8 for c in candidates):
+            llm_results = await self._llm_discovery(company)
+            candidates.extend(llm_results)
+
         # Deduplicate by URL (keep highest confidence)
         seen: dict[str, dict] = {}
         for c in candidates:
@@ -323,6 +329,95 @@ class CareerPageDiscoverer:
                     "page_type": "listing_page",
                     "requires_js": url in js_required,
                 })
+        return results
+
+    async def _llm_discovery(self, company: Company) -> list[dict]:
+        """Use Playwright + LLM to find the careers/jobs listing page.
+
+        Renders the company homepage with Playwright, then asks the LLM to:
+        1. Identify links to careers/jobs pages
+        2. Return the best URL for the main job listings page
+
+        This catches what heuristic BFS misses: JS-rendered navigation,
+        single-page apps, non-standard URL patterns, hidden menus.
+        """
+        import httpx
+        from app.core.config import settings
+        from markdownify import markdownify
+
+        results = []
+        try:
+            # Render the homepage with Playwright (captures JS-rendered content)
+            html = await self.client.get_rendered(company.root_url)
+            if not html or len(html) < 500:
+                return []
+
+            # Convert to readable text for the LLM
+            md = markdownify(html[:15000], strip=["script", "style"])
+
+            # Extract all links from the page for the LLM to analyze
+            soup = BeautifulSoup(html, "lxml")
+            links = []
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                text = a.get_text(strip=True)[:80]
+                if href and text and len(text) > 1:
+                    from urllib.parse import urljoin
+                    abs_url = urljoin(company.root_url, href)
+                    links.append(f"  [{text}]({abs_url})")
+
+            links_text = "\n".join(links[:60])  # Cap at 60 links
+
+            prompt = (
+                f"You are analyzing a company website to find their careers/jobs page.\n"
+                f"Company: {company.name} ({company.domain})\n"
+                f"Homepage URL: {company.root_url}\n\n"
+                f"Here are the links found on the page:\n{links_text}\n\n"
+                f"Which URL is the main careers/jobs listing page where ALL open positions are listed?\n"
+                f"Look for links containing: careers, jobs, vacancies, openings, positions, work-with-us, join-us\n"
+                f"Return ONLY the full URL. If no careers page found, return NONE.\n\n"
+                f"URL:"
+            )
+
+            ollama_host = getattr(settings, "OLLAMA_HOST", "ollama")
+            async with httpx.AsyncClient(timeout=25) as http:
+                r = await http.post(
+                    f"http://{ollama_host}:11434/api/generate",
+                    json={
+                        "model": "qwen2.5:3b",
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 100},
+                    },
+                )
+                if r.status_code != 200:
+                    return []
+                raw = r.json().get("response", "").strip()
+
+            # Parse the URL from LLM response
+            import re
+            url_match = re.search(r'https?://[^\s<>"\]]+', raw)
+            if url_match:
+                found_url = url_match.group(0).rstrip(".,;)")
+                # Validate it's on the same domain
+                from urllib.parse import urlparse
+                if company.domain in urlparse(found_url).netloc:
+                    # Normalize before adding
+                    found_url = self._normalize_career_url(found_url)
+                    if found_url:
+                        results.append({
+                            "url": found_url,
+                            "discovery_method": "llm_playwright",
+                            "confidence": 0.85,
+                            "is_primary": True,
+                            "page_type": "listing_page",
+                            "requires_js": True,
+                        })
+                        logger.info(f"LLM discovered career page for {company.domain}: {found_url}")
+
+        except Exception as e:
+            logger.debug(f"LLM discovery failed for {company.domain}: {e}")
+
         return results
 
     def _normalize_discovered_url(self, url: str) -> str:

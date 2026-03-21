@@ -864,13 +864,30 @@ class JobExtractor:
                 # Also check if template has a saved location_selector
                 tmpl_loc_selector = selectors.get("location_selector", "")
 
+                # Get LLM-mapped selectors for richer extraction
+                tmpl_title_selector = selectors.get("title_selector", "")
+                tmpl_link_selector = selectors.get("link_selector", "")
+                tmpl_dept_selector = selectors.get("department_selector", "")
+                tmpl_emp_selector = selectors.get("employment_type_selector", "")
+
                 jobs = []
                 for el in elements:
-                    link = el.find("a")
-                    title_el = el.find(["h1", "h2", "h3", "h4", "strong", "b"]) or el
+                    # Title: use template selector if available, fallback to heading tags
+                    if tmpl_title_selector:
+                        title_el = el.select_one(tmpl_title_selector)
+                    else:
+                        title_el = None
+                    if not title_el:
+                        title_el = el.find(["h1", "h2", "h3", "h4", "strong", "b"]) or el
                     title = title_el.get_text(strip=True)[:200]
                     if not title or len(title) < 5:
                         continue
+
+                    # Link: use template selector if available
+                    if tmpl_link_selector:
+                        link = el.select_one(tmpl_link_selector)
+                    else:
+                        link = el.find("a")
                     job_url = urljoin(career_page.url, link["href"]) if link and link.get("href") else career_page.url
 
                     # --- Location extraction ---
@@ -937,10 +954,24 @@ class JobExtractor:
                             if candidate.lower() not in ("all", "search", "view", "apply", "new", "list", "category"):
                                 loc_raw = candidate
 
+                    # Extract department + employment type from template selectors
+                    department = None
+                    if tmpl_dept_selector:
+                        dept_el = el.select_one(tmpl_dept_selector)
+                        if dept_el:
+                            department = dept_el.get_text(strip=True)[:100]
+                    emp_type = None
+                    if tmpl_emp_selector:
+                        emp_el = el.select_one(tmpl_emp_selector)
+                        if emp_el:
+                            emp_type = emp_el.get_text(strip=True)[:50]
+
                     jobs.append({
                         "title": title,
                         "source_url": job_url,
                         "location_raw": loc_raw,
+                        "department": department,
+                        "employment_type": emp_type,
                         "extraction_method": f"template_{tmpl_type}",
                         "extraction_confidence": float(template.accuracy_score or 0.7),
                     })

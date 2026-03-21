@@ -132,7 +132,7 @@ class SiteStructureExtractor:
             await self._set_status(career_page, STATUS_OK)
             return True
 
-        # Layer 2: Repeating block detector
+        # Layer 2: Repeating block detector (fast heuristic)
         if await self._layer_repeating_blocks(career_page, html):
             await self._set_status(career_page, STATUS_OK)
             return True
@@ -142,15 +142,18 @@ class SiteStructureExtractor:
             await self._set_status(career_page, STATUS_OK)
             return True
 
-        # Layers 4-6: LLM extraction — only if enabled (disabled during bulk runs for speed)
+        # Layer 4: LLM + Playwright — comprehensive field mapping
+        # Escalate to LLM for ALL pages that heuristics couldn't map.
+        # The LLM uses Playwright-rendered HTML to handle JS-heavy sites
+        # and maps all available fields (title, location, dept, type, etc.)
         from app.core.config import settings as _settings
         if getattr(_settings, "SITE_STRUCTURE_LLM_ENABLED", True):
-            # Layer 4: LLM fast (3B)
+            # Layer 4: LLM fast (3B) with Playwright
             if await self._layer_llm(career_page, html, model="qwen2.5:3b"):
                 await self._set_status(career_page, STATUS_OK)
                 return True
 
-            # Layer 5: LLM full (8B)
+            # Layer 5: LLM full (8B) with Playwright
             if await self._layer_llm(career_page, html, model="llama3.1:8b"):
                 await self._set_status(career_page, STATUS_OK)
                 return True
@@ -416,24 +419,57 @@ class SiteStructureExtractor:
             return False
 
     async def _layer_llm(self, career_page, html: str, model: str = "qwen2.5:3b") -> bool:
-        """Layers 5+6: Ask LLM to identify job listing CSS selector from page HTML."""
+        """LLM-powered comprehensive field mapping.
+
+        Uses Playwright-rendered HTML + LLM to identify:
+        - Job listing container selector
+        - Title, location, description, employment type, salary selectors
+        - Individual job detail page URL pattern
+
+        This is the most powerful extraction layer — handles any site structure.
+        """
         try:
             import httpx, json, re
             from app.core.config import settings
+            from markdownify import markdownify
 
             ollama_host = getattr(settings, 'OLLAMA_HOST', 'ollama')
             ollama_url = f"http://{ollama_host}:11434/api/generate"
 
-            # Trim HTML to keep prompt manageable
-            html_excerpt = html[:4000]
+            # Try Playwright-rendered HTML first (catches JS-rendered content)
+            rendered_html = html
+            try:
+                from app.crawlers.http_client import ResilientHTTPClient
+                client = ResilientHTTPClient(timeout=20)
+                rendered = await client.get_rendered(career_page.url)
+                if rendered and len(rendered) > len(html) + 500:
+                    rendered_html = rendered
+            except Exception:
+                pass
+
+            # Convert to readable markdown for better LLM comprehension
+            page_md = markdownify(rendered_html[:10000], strip=["script", "style", "nav"])
+            html_excerpt = rendered_html[:5000]
+
             prompt = (
-                f"You are analyzing a company careers page at: {career_page.url}\n"
-                f"Identify the CSS selector that matches individual job listing elements.\n"
-                f"Return ONLY a JSON object with keys: job_listing_selector (CSS selector string), "
-                f"title_selector, location_selector. Example:\n"
-                f'{{"job_listing_selector": "li.job-item", "title_selector": "h3.job-title", "location_selector": ".location"}}\n'
-                f"If you cannot identify the structure, return: {{}}\n\n"
-                f"Page HTML excerpt:\n{html_excerpt}\n\nJSON:"
+                f"Analyze this careers page and identify the structure of job listings.\n"
+                f"URL: {career_page.url}\n\n"
+                f"Return a JSON object with these fields:\n"
+                f"  job_listing_selector: CSS selector for each job card/row element\n"
+                f"  title_selector: CSS selector for the job title within each card\n"
+                f"  location_selector: CSS selector for location within each card\n"
+                f"  link_selector: CSS selector for the link to the job detail page\n"
+                f"  department_selector: CSS selector for department (if visible)\n"
+                f"  employment_type_selector: CSS selector for job type (if visible)\n"
+                f"  job_count: estimated number of jobs visible on the page\n"
+                f"  detail_url_pattern: URL pattern for individual job pages (if identifiable)\n\n"
+                f"Example response:\n"
+                f'{{"job_listing_selector": "div.job-card", "title_selector": "h3.title", '
+                f'"location_selector": "span.location", "link_selector": "a.job-link", '
+                f'"job_count": 25, "detail_url_pattern": "/jobs/{{id}}-{{slug}}"}}\n\n'
+                f"If this is NOT a job listing page, return: {{}}\n\n"
+                f"HTML excerpt:\n{html_excerpt}\n\n"
+                f"Page text:\n{page_md[:3000]}\n\nJSON:"
             )
 
             async with httpx.AsyncClient(timeout=30) as http:
@@ -441,7 +477,7 @@ class SiteStructureExtractor:
                     "model": model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 300},
+                    "options": {"temperature": 0.1, "num_predict": 400},
                 })
                 if r.status_code != 200:
                     return False
@@ -454,9 +490,22 @@ class SiteStructureExtractor:
             if not selectors or not selectors.get("job_listing_selector"):
                 return False
 
+            # Validate the selector actually matches elements
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(rendered_html, "lxml")
+            try:
+                matches = soup.select(selectors["job_listing_selector"])
+                if len(matches) < 2:
+                    logger.debug(f"LLM selector matched {len(matches)} elements — too few")
+                    return False
+                selectors["job_count"] = len(matches)
+            except Exception:
+                pass  # Invalid CSS selector — still save it, template extraction will handle
+
             selectors["method"] = f"llm_{model.replace(':', '_')}"
-            await self._save_template(career_page, "llm_bootstrapped", selectors, accuracy=0.65)
-            logger.info(f"LLM ({model}) found structure for {career_page.url}")
+            selectors["used_playwright"] = rendered_html != html
+            await self._save_template(career_page, "llm_bootstrapped", selectors, accuracy=0.75)
+            logger.info(f"LLM ({model}) mapped {selectors.get('job_count', '?')} jobs with {len(selectors)} fields for {career_page.url}")
             return True
         except Exception as e:
             logger.warning(f"LLM layer ({model}) failed for {career_page.url}: {e}")
