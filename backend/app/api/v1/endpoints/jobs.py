@@ -396,7 +396,7 @@ async def job_crawl_breakdown(
         "live_jobs": r.live_jobs,
         "quality_breakdown": {
             "A_complete": {"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)},
-            "B_missing_location": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
+            "B_good": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
             "C_fair": {"count": 0, "pct": 0},
             "D_poor": {"count": 0, "pct": 0},
             "total": q.total_live,

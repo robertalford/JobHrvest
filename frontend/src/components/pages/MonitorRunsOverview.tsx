@@ -196,7 +196,7 @@ interface CrawlBreakdownData {
   live_jobs: number;
   quality_breakdown: {
     A_complete: QualityBreakdownEntry;
-    B_missing_location: QualityBreakdownEntry;
+    B_good: QualityBreakdownEntry;
     C_fair: QualityBreakdownEntry;
     D_poor: QualityBreakdownEntry;
     total: number;
@@ -206,7 +206,7 @@ interface CrawlBreakdownData {
 function QualityBreakdownCard({ breakdown }: { breakdown: CrawlBreakdownData['quality_breakdown'] }) {
   const bands = [
     { key: 'A', label: 'A - Complete',          data: breakdown.A_complete,          color: 'bg-green-500', dot: 'bg-green-500' },
-    { key: 'B', label: 'B - Missing Location',  data: breakdown.B_missing_location,  color: 'bg-blue-500',  dot: 'bg-blue-500' },
+    { key: 'B', label: 'B - Good',  data: breakdown.B_good,  color: 'bg-blue-500',  dot: 'bg-blue-500' },
     { key: 'C', label: 'C - Fair',              data: breakdown.C_fair,              color: 'bg-yellow-500', dot: 'bg-yellow-500' },
     { key: 'D', label: 'D - Poor',              data: breakdown.D_poor,              color: 'bg-red-500',   dot: 'bg-red-500' },
   ];
