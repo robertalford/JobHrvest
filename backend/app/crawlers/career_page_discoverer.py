@@ -66,7 +66,7 @@ SKIP_EXTENSIONS = {".pdf", ".doc", ".docx", ".xml", ".zip", ".png", ".jpg",
 
 # Max career pages to store per company — prevents crawl explosions on ATS-hosted sites
 # (e.g. careers.footlocker.com had 1,287 individual job URLs saved as "listing pages")
-MAX_PAGES_PER_COMPANY = 50
+MAX_PAGES_PER_COMPANY = 5
 
 # Regex: URL patterns that strongly indicate an individual job detail page (not a listing)
 _JOB_DETAIL_PATH_RE = re.compile(
@@ -123,11 +123,10 @@ class CareerPageDiscoverer:
         heuristic_results = await self._heuristic_discovery(company.root_url, company.domain)
         candidates.extend(heuristic_results)
 
-        # 2d: LLM-powered discovery — Playwright renders the site, LLM identifies job listing pages
-        # This catches pages that heuristic BFS misses (JS-rendered navs, non-standard URL patterns)
-        if not any(c["confidence"] >= 0.8 for c in candidates):
-            llm_results = await self._llm_discovery(company)
-            candidates.extend(llm_results)
+        # 2d: LLM-powered discovery — ALWAYS run to validate/improve heuristic results
+        # Playwright renders the homepage, LLM identifies the correct job listing page
+        llm_results = await self._llm_discovery(company)
+        candidates.extend(llm_results)
 
         # Deduplicate by URL (keep highest confidence)
         seen: dict[str, dict] = {}
@@ -147,7 +146,7 @@ class CareerPageDiscoverer:
                     f"— skipping {len(seen) - len(pages)} lower-confidence candidates"
                 )
                 break
-            if meta["confidence"] >= 0.25:  # Only persist candidates with some confidence
+            if meta["confidence"] >= 0.50:  # Only persist candidates with some confidence
                 # Final guard: skip job detail URLs regardless of confidence score
                 if _JOB_DETAIL_PATH_RE.search(urlparse(url).path + "?" + urlparse(url).query):
                     continue
@@ -530,6 +529,9 @@ class CareerPageDiscoverer:
         '/login', '/signin', '/sign-in', '/register', '/forgot-password',
         'create_account', '/wechat/ShareJob', '/wechat/share',
         '/saved-jobs', '/job-alerts', 'mailto:', 'javascript:',
+        '/passwordreset', '/alertregister', '/talentpool',
+        '/alerts', '/vacancy/', '/subscribe', '/notification',
+        '/bookmark', '/shortlist', '/watchlist',
         '#content', '/content/dam/', 'show_more?', '&in_create_account',
     ]
 
