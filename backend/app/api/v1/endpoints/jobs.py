@@ -84,7 +84,7 @@ async def job_stats(db: AsyncSession = Depends(get_db)):
                   AND (location_city IS NOT NULL OR location_country IS NOT NULL)
                   AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
                   AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-                  AND (quality_score IS NULL OR quality_score >= 20)
+                  AND (quality_score IS NULL OR quality_score >= 0.20)
                   AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
                   AND first_seen_at >= :sixty_days_ago
             )                                                                           AS live_jobs
@@ -563,7 +563,7 @@ async def reprocess_stats(db: AsyncSession = Depends(get_db)):
                              AND quality_score < 80)                             AS good,
             COUNT(*) FILTER (WHERE is_canonical AND quality_score >= 40
                              AND quality_score < 60)                             AS fair,
-            COUNT(*) FILTER (WHERE is_canonical AND quality_score >= 20
+            COUNT(*) FILTER (WHERE is_canonical AND quality_score >= 0.20
                              AND quality_score < 40)                             AS poor,
             COUNT(*) FILTER (WHERE is_canonical AND quality_score < 20)          AS disqualified,
             -- Description coverage
