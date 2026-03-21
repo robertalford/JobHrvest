@@ -73,18 +73,18 @@ async def job_stats(db: AsyncSession = Depends(get_db)):
                              AND first_seen_at >= :today_start)                         AS new_today,
             COUNT(*) FILTER (WHERE is_active AND is_canonical
                              AND first_seen_at >= :week_start)                          AS new_this_week,
-            -- Live jobs: canonical, active, all core fields present, passed quality checks,
-            -- not expired, and posted/seen within the last 60 days
+            -- Live jobs: pass full quality gate (core fields + geocoded + no bad/scam + not expired)
             COUNT(*) FILTER (
                 WHERE is_active
                   AND is_canonical
-                  AND title IS NOT NULL
-                  AND description IS NOT NULL
+                  AND title IS NOT NULL AND title != ''
                   AND company_id IS NOT NULL
+                  AND description IS NOT NULL AND length(description) >= 200
                   AND location_raw IS NOT NULL AND location_raw != ''
-                  AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
-                  AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-                  AND quality_score IS NOT NULL AND quality_score >= 0.60
+                  AND geo_resolved = true
+                  AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
+                  AND (quality_flags IS NULL OR (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE)
+                  AND quality_score IS NOT NULL AND quality_score > 0
                   AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
                   AND first_seen_at >= :sixty_days_ago
             )                                                                           AS live_jobs
@@ -324,69 +324,67 @@ async def job_crawl_breakdown(
     to_dt: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Breakdown of job extraction results for the Jobs Crawled section."""
+    """Breakdown of job extraction: pass/fail gate + quality richness for passing jobs."""
     from datetime import datetime, timedelta
     from sqlalchemy import text
     from zoneinfo import ZoneInfo
 
-    # Default: last 24 hours
     if not from_dt:
         f = datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
     else:
         f = datetime.fromisoformat(from_dt)
     t = datetime.fromisoformat(to_dt) if to_dt else datetime.now(ZoneInfo("UTC"))
 
-    result = await db.execute(text("""
+    # Pass/fail gate criteria (must match enforce_quality_gate exactly)
+    PASS_GATE = """
+        title IS NOT NULL AND title != ''
+        AND company_id IS NOT NULL
+        AND description IS NOT NULL AND length(description) >= 200
+        AND location_raw IS NOT NULL AND location_raw != ''
+        AND geo_resolved = true
+        AND is_canonical = true
+        AND (quality_flags IS NULL OR (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE)
+        AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
+        AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+        AND first_seen_at >= NOW() - INTERVAL '60 days'
+    """
+
+    result = await db.execute(text(f"""
         SELECT
             COUNT(*) AS total_extracted,
             COUNT(*) FILTER (WHERE
                 (title IS NULL OR title = '') OR
-                (description IS NULL OR length(description) < 20) OR
-                (location_raw IS NULL OR location_raw = '')
+                company_id IS NULL OR
+                (description IS NULL OR length(description) < 200) OR
+                (location_raw IS NULL OR location_raw = '' OR geo_resolved IS NOT TRUE)
             ) AS failed_core_fields,
             COUNT(*) FILTER (WHERE (quality_flags->>'bad_words_detected')::boolean IS TRUE) AS failed_bad_words,
-            COUNT(*) FILTER (WHERE NOT is_canonical AND is_active) AS failed_duplicates,
+            COUNT(*) FILTER (WHERE is_active AND NOT is_canonical) AS failed_duplicates,
             COUNT(*) FILTER (WHERE
                 (date_expires IS NOT NULL AND date_expires < CURRENT_DATE) OR
-                (first_seen_at < NOW() - INTERVAL '60 days' AND NOT is_active)
+                (first_seen_at < NOW() - INTERVAL '60 days')
             ) AS failed_expired,
             COUNT(*) FILTER (WHERE (quality_flags->>'scam_detected')::boolean IS TRUE) AS failed_scam,
-            COUNT(*) FILTER (WHERE
-                is_active AND is_canonical
-                AND title IS NOT NULL AND title != ''
-                AND description IS NOT NULL AND length(description) >= 20
-                AND location_raw IS NOT NULL AND location_raw != ''
-                AND company_id IS NOT NULL
-                AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
-                AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-                AND quality_score IS NOT NULL AND quality_score >= 0.60
-                AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
-            ) AS live_jobs
+            COUNT(*) FILTER (WHERE is_active AND {PASS_GATE}) AS live_jobs
         FROM jobs
         WHERE created_at BETWEEN :from_dt AND :to_dt
-    """), {"from_dt": f, "to_dt": t})
+    """), {{"from_dt": f, "to_dt": t}})
     r = result.one()
 
-    # Quality breakdown of live jobs — same strict criteria as live_jobs count
-    quality_result = await db.execute(text("""
+    # Quality breakdown of live (passing) jobs — richness bands
+    quality_result = await db.execute(text(f"""
         SELECT
-            COUNT(*) FILTER (WHERE quality_score >= 0.8) AS quality_a,
-            COUNT(*) FILTER (WHERE quality_score >= 0.6 AND quality_score < 0.8) AS quality_b,
+            COUNT(*) FILTER (WHERE quality_score >= 0.80) AS quality_a,
+            COUNT(*) FILTER (WHERE quality_score >= 0.60 AND quality_score < 0.80) AS quality_b,
+            COUNT(*) FILTER (WHERE quality_score >= 0.40 AND quality_score < 0.60) AS quality_c,
+            COUNT(*) FILTER (WHERE quality_score > 0 AND quality_score < 0.40) AS quality_d,
             COUNT(*) AS total_live
         FROM jobs
-        WHERE is_active AND is_canonical
-          AND title IS NOT NULL AND title != ''
-          AND description IS NOT NULL AND length(description) >= 20
-          AND location_raw IS NOT NULL AND location_raw != ''
-          AND company_id IS NOT NULL
-          AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
-          AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-          AND quality_score IS NOT NULL AND quality_score >= 0.60
-          AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+        WHERE is_active AND {PASS_GATE}
     """))
     q = quality_result.one()
 
-    return {
+    return {{
         "total_extracted": r.total_extracted,
         "failed_core_fields": r.failed_core_fields,
         "failed_bad_words": r.failed_bad_words,
@@ -394,15 +392,14 @@ async def job_crawl_breakdown(
         "failed_expired": r.failed_expired,
         "failed_scam": r.failed_scam,
         "live_jobs": r.live_jobs,
-        "quality_breakdown": {
-            "A_complete": {"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)},
-            "B_good": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
-            "C_fair": {"count": 0, "pct": 0},
-            "D_poor": {"count": 0, "pct": 0},
+        "quality_breakdown": {{
+            "A_complete": {{"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)}},
+            "B_good": {{"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)}},
+            "C_fair": {{"count": q.quality_c, "pct": round(100 * q.quality_c / max(q.total_live, 1), 1)}},
+            "D_poor": {{"count": q.quality_d, "pct": round(100 * q.quality_d / max(q.total_live, 1), 1)}},
             "total": q.total_live,
-        }
-    }
-
+        }}
+    }}
 
 @router.get("/description-audit")
 async def description_audit(db: AsyncSession = Depends(get_db)):

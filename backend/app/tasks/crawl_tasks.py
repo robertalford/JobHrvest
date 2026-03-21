@@ -1603,70 +1603,103 @@ def drain_ats_bulk():
 
 @celery_app.task(name="queue.enforce_quality_gate")
 def enforce_quality_gate():
-    """Enforce minimum quality standards on active jobs.
+    """Enforce pass/fail quality gate + compute richness score for passing jobs.
 
-    Core fields required: title, description (>50 chars), location_raw.
-    Jobs missing location_raw get queued for location rescue.
-    Jobs with no title or very short description are deactivated.
+    PASS/FAIL GATE (binary — all must pass to be live):
+      - title present and non-empty
+      - company_id present
+      - description >= 200 characters
+      - location_raw present AND geo_resolved = true
+      - is_canonical = true (not a duplicate)
+      - no bad_words_detected
+      - no scam_detected
+      - not expired (date_expires >= today or null)
+      - not stale (first_seen_at within 60 days)
+
+    QUALITY SCORE (0-1, only for passing jobs — measures data richness):
+      0.20 base (passed gate)
+      + 0.15 description depth (200-500: +0.05, 500-1000: +0.10, 1000+: +0.15)
+      + 0.15 location granularity (city: +0.10, high confidence: +0.05)
+      + 0.10 employment_type present
+      + 0.10 salary info present
+      + 0.05 seniority_level
+      + 0.05 department or team
+      + 0.05 requirements section
+      + 0.05 benefits section
+      + 0.05 application_url
+      + 0.05 date_posted
+      = 1.00 max
+
+    Jobs that FAIL the gate get quality_score = 0.
+
     Runs every 2 hours.
     """
     async def _run():
         from app.db.base import AsyncSessionLocal
         from sqlalchemy import text
         async with AsyncSessionLocal() as db:
-            # 1. Rescore jobs: penalize missing core fields
-            # quality_score formula: base 0.4 + 0.2*(has_description) + 0.2*(has_location) + 0.1*(has_employment_type) + 0.1*(has_salary)
+            # Step 1: Score ALL active jobs with the new formula
             result = await db.execute(text("""
                 UPDATE jobs SET
-                    quality_score = GREATEST(0.05,
-                        0.40
-                        + CASE WHEN description IS NOT NULL AND length(description) > 50 THEN 0.20 ELSE 0.0 END
-                        + CASE WHEN location_raw IS NOT NULL AND location_raw != '' THEN 0.20 ELSE 0.0 END
-                        + CASE WHEN employment_type IS NOT NULL THEN 0.10 ELSE 0.0 END
-                        + CASE WHEN salary_raw IS NOT NULL AND salary_raw != '' THEN 0.10 ELSE 0.0 END
-                    ),
+                    quality_score = CASE
+                        -- FAIL gate: score = 0
+                        WHEN NOT (
+                            title IS NOT NULL AND title != ''
+                            AND company_id IS NOT NULL
+                            AND description IS NOT NULL AND length(description) >= 200
+                            AND location_raw IS NOT NULL AND location_raw != ''
+                            AND geo_resolved = true
+                            AND is_canonical = true
+                            AND (quality_flags IS NULL OR (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE)
+                            AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
+                            AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+                            AND first_seen_at >= NOW() - INTERVAL '60 days'
+                        ) THEN 0.0
+                        -- PASS gate: compute richness score
+                        ELSE LEAST(1.0,
+                            0.20  -- base: passed all checks
+                            -- Description depth
+                            + CASE
+                                WHEN length(description) >= 1000 THEN 0.15
+                                WHEN length(description) >= 500 THEN 0.10
+                                ELSE 0.05
+                              END
+                            -- Location granularity
+                            + CASE WHEN location_city IS NOT NULL AND location_city != '' THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN geo_confidence IS NOT NULL AND geo_confidence >= 0.8 THEN 0.05 ELSE 0.0 END
+                            -- Optional structured fields
+                            + CASE WHEN employment_type IS NOT NULL THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN salary_raw IS NOT NULL AND salary_raw != '' THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN seniority_level IS NOT NULL AND seniority_level != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN department IS NOT NULL OR team IS NOT NULL THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN requirements IS NOT NULL AND requirements != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN benefits IS NOT NULL AND benefits != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN application_url IS NOT NULL AND application_url != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN date_posted IS NOT NULL THEN 0.05 ELSE 0.0 END
+                        )
+                    END,
                     quality_scored_at = NOW()
                 WHERE is_active = true
-                AND (quality_score IS NULL OR quality_scored_at IS NULL
-                     OR quality_scored_at < NOW() - INTERVAL '24 hours')
+                AND (quality_scored_at IS NULL OR quality_scored_at < NOW() - INTERVAL '2 hours')
             """))
             rescored = result.rowcount
             await db.commit()
 
-            # 2. Deactivate jobs with no title (should never happen) or truly empty
-            result2 = await db.execute(text("""
-                UPDATE jobs SET is_active = false
-                WHERE is_active = true
-                AND (title IS NULL OR title = '' OR length(title) < 3)
+            # Step 2: Count pass vs fail
+            counts = await db.execute(text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE quality_score > 0) AS passed,
+                    COUNT(*) FILTER (WHERE quality_score = 0) AS failed,
+                    COUNT(*) FILTER (WHERE location_raw IS NULL OR location_raw = '') AS missing_location
+                FROM jobs WHERE is_active = true
             """))
-            deactivated = result2.rowcount
+            c = counts.one()
             await db.commit()
 
-            # 3. Queue location rescue for jobs missing location_raw but having a source_url
-            # (rescue_job_locations already exists as a beat task, just bump its priority)
-            missing_loc = await db.execute(text("""
-                SELECT COUNT(*) FROM jobs
-                WHERE is_active = true
-                AND (location_raw IS NULL OR location_raw = '')
-                AND source_url IS NOT NULL AND source_url != ''
-            """))
-            missing_count = missing_loc.scalar() or 0
-
-            # 4. Log summary
             logger.info(
-                f"Quality gate: rescored={rescored}, deactivated={deactivated}, "
-                f"missing_location={missing_count}"
+                f"Quality gate: rescored={rescored}, "
+                f"passed={c.passed}, failed={c.failed}, "
+                f"missing_location={c.missing_location}"
             )
-
-            # 5. Trigger immediate geocoding for ungeocoded jobs
-            pending_geo = await db.execute(text("""
-                SELECT COUNT(*) FROM jobs
-                WHERE is_active = true
-                AND location_raw IS NOT NULL AND location_raw != ''
-                AND (geo_resolved IS NULL OR geo_resolved = false)
-            """))
-            pending_geo_count = pending_geo.scalar() or 0
-            if pending_geo_count > 0:
-                logger.info(f"Quality gate: {pending_geo_count} jobs need geocoding")
 
     _run_async(_run())
