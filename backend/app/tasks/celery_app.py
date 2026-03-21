@@ -91,7 +91,7 @@ celery_app.conf.update(
         # Enforce quality gate: rescore jobs, deactivate bad ones, trigger location rescue
         "enforce-quality-gate": {
             "task": "queue.enforce_quality_gate",
-            "schedule": 2 * 3600,
+            "schedule": 5 * 60,
         },
         # Quality scoring backfill — every 30 min for newly crawled jobs
         "score-jobs-batch": {

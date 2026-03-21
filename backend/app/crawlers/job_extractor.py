@@ -1308,6 +1308,45 @@ class JobExtractor:
         self.db.add(job)
         await self.db.commit()
         await self.db.refresh(job)
+
+        # Inline quality scoring — so jobs appear as live immediately
+        try:
+            from sqlalchemy import text as _qt
+            await self.db.execute(_qt("""
+                UPDATE jobs SET quality_score = CASE
+                    WHEN NOT (
+                        title IS NOT NULL AND title != ''
+                        AND company_id IS NOT NULL
+                        AND description IS NOT NULL AND length(description) >= 200
+                        AND location_raw IS NOT NULL AND location_raw != ''
+                        AND geo_resolved = true
+                        AND is_canonical = true
+                        AND (quality_flags IS NULL OR (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE)
+                        AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
+                        AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+                        AND first_seen_at >= NOW() - INTERVAL '60 days'
+                    ) THEN 0.0
+                    ELSE LEAST(1.0,
+                        0.20
+                        + CASE WHEN length(description) >= 1000 THEN 0.15 WHEN length(description) >= 500 THEN 0.10 ELSE 0.05 END
+                        + CASE WHEN location_city IS NOT NULL AND location_city != '' THEN 0.10 ELSE 0.0 END
+                        + CASE WHEN geo_confidence IS NOT NULL AND geo_confidence >= 0.8 THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN employment_type IS NOT NULL THEN 0.10 ELSE 0.0 END
+                        + CASE WHEN salary_raw IS NOT NULL AND salary_raw != '' THEN 0.10 ELSE 0.0 END
+                        + CASE WHEN seniority_level IS NOT NULL AND seniority_level != '' THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN department IS NOT NULL OR team IS NOT NULL THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN requirements IS NOT NULL AND requirements != '' THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN benefits IS NOT NULL AND benefits != '' THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN application_url IS NOT NULL AND application_url != '' THEN 0.05 ELSE 0.0 END
+                        + CASE WHEN date_posted IS NOT NULL THEN 0.05 ELSE 0.0 END
+                    )
+                END, quality_scored_at = NOW()
+                WHERE id = :jid
+            """), {"jid": str(job.id)})
+            await self.db.commit()
+        except Exception:
+            pass
+
         return job
 
     async def _save_tags(self, job: Job, data: dict) -> None:
