@@ -1806,3 +1806,81 @@ def enforce_quality_gate():
             )
 
     _run_async(_run())
+
+
+@celery_app.task(name="crawl.llm_unified_company_config", bind=True, max_retries=1,
+                 soft_time_limit=120, time_limit=150)
+def llm_unified_company_config(self, company_id: str, queue_item_id: str = None):
+    """Unified LLM company + site config in a single Playwright+LLM pass.
+
+    Replaces fix_company_sites + fix_site_structure with one LLM call that:
+    1. Renders homepage → LLM finds job listing URL
+    2. Renders listing page → LLM maps all 4 core fields
+    3. Creates career_page + site_template → queues for job_crawling
+
+    If LLM can't find/map all 4 fields → company marked failed.
+    """
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.models.company import Company
+        from app.services.llm_unified_config import LLMUnifiedConfig
+        from app.services import queue_manager
+        from app.core.config import settings
+
+        async with AsyncSessionLocal() as db:
+            company = await db.get(Company, uuid.UUID(company_id))
+            if not company or not company.is_active:
+                if queue_item_id:
+                    await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    await db.commit()
+                return
+
+            try:
+                config = LLMUnifiedConfig(
+                    db,
+                    ollama_host=getattr(settings, "OLLAMA_HOST", "ollama"),
+                    model=getattr(settings, "OLLAMA_FAST_MODEL", "qwen2.5:3b"),
+                )
+                result = await config.configure_company(company)
+
+                if queue_item_id:
+                    if result["status"] == "success":
+                        await queue_manager.complete(db, uuid.UUID(queue_item_id))
+                    else:
+                        await queue_manager.fail(db, uuid.UUID(queue_item_id),
+                                                  result.get("error", "LLM config failed"))
+                    await db.commit()
+
+                logger.info(
+                    f"llm_unified_config: {company.domain} → {result['status']} "
+                    f"({result.get('error', result.get('job_count', 0))})"
+                )
+
+            except Exception as e:
+                logger.error(f"llm_unified_config failed for {company.domain}: {e}")
+                if queue_item_id:
+                    await queue_manager.fail(db, uuid.UUID(queue_item_id), str(e)[:200])
+                    await db.commit()
+                raise self.retry(exc=e)
+
+    _run_async(_run())
+
+
+@celery_app.task(name="queue.drain_llm_unified")
+def drain_llm_unified():
+    """Drain company_config queue through the unified LLM pipeline."""
+    async def _run():
+        from app.db.base import AsyncSessionLocal
+        from app.services import queue_manager
+        async with AsyncSessionLocal() as db:
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=20)
+            await db.commit()
+            for row in items:
+                queue_item_id, company_id = row[0], row[1]
+                if company_id:
+                    llm_unified_company_config.apply_async(
+                        args=[str(company_id), str(queue_item_id)],
+                        queue="company_config",
+                    )
+    _run_async(_run())
+

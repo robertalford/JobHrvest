@@ -67,7 +67,7 @@ celery_app.conf.update(
         # site_config is one-time per site — moderate drain rate is fine
         "drain-site-config":     {"task": "queue.drain_site_config",     "schedule": 10},
         # company_config is one-time per company — aggressive drain to clear 14k backlog
-        "drain-company-config":  {"task": "queue.drain_company_config",  "schedule": 10},
+        "drain-company-config":  {"task": "queue.drain_llm_unified",  "schedule": 10},
         # discovery sources
         "drain-discovery":       {"task": "queue.drain_discovery",       "schedule": 60},
         # Populate queues every 30 min (clears backlog faster; hourly was too slow)
