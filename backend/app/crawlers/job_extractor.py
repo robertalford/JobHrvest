@@ -921,6 +921,14 @@ class JobExtractor:
         "facebook", "twitter", "linkedin", "instagram", "youtube",
     }
 
+    _GARBAGE_LOCATIONS = frozenset([
+        'location', 'details', 'standort', 'all', 'n/a', 'tbd', 'various',
+        '-', '--', '.', 'job location', 'locations', 'not specified',
+        'unspecified', 'see below', 'see description', 'tba', 'view',
+        'not available', 'worldwide', 'to be determined',
+    ])
+
+
     def _extract_repeating_blocks(self, html: str, base_url: str) -> list[dict]:
         """Stage 3e: Structural DOM analysis to find job listing blocks.
 
@@ -1263,6 +1271,11 @@ class JobExtractor:
             await self.db.commit()
             return existing
 
+        # Filter garbage location values
+        loc_raw = data.get("location_raw")
+        if loc_raw and loc_raw.strip().lower() in self._GARBAGE_LOCATIONS:
+            loc_raw = None
+
         job = Job(
             company_id=company.id,
             career_page_id=page.id,
@@ -1270,7 +1283,7 @@ class JobExtractor:
             external_id=external_id,
             title=title,
             description=data.get("description"),
-            location_raw=data.get("location_raw"),
+            location_raw=loc_raw,
             location_city=data.get("location_city"),
             location_state=data.get("location_state"),
             location_country=data.get("location_country", "Australia"),
