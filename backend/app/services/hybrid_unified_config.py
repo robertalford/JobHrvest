@@ -77,6 +77,7 @@ class HybridUnifiedConfig:
                   "job_count": 0, "fields_mapped": [], "error": None}
 
         client = ResilientHTTPClient(timeout=20)
+        html = ""
 
         # ━━━ FAST PATH 1: Known ATS platform ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         ats = company.ats_platform
