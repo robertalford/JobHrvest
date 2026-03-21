@@ -81,10 +81,10 @@ async def job_stats(db: AsyncSession = Depends(get_db)):
                   AND title IS NOT NULL
                   AND description IS NOT NULL
                   AND company_id IS NOT NULL
-                  AND (location_city IS NOT NULL OR location_country IS NOT NULL)
+                  AND location_raw IS NOT NULL AND location_raw != ''
                   AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
                   AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-                  AND (quality_score IS NULL OR quality_score >= 0.20)
+                  AND quality_score IS NOT NULL AND quality_score >= 0.60
                   AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
                   AND first_seen_at >= :sixty_days_ago
             )                                                                           AS live_jobs
@@ -353,11 +353,13 @@ async def job_crawl_breakdown(
             COUNT(*) FILTER (WHERE (quality_flags->>'scam_detected')::boolean IS TRUE) AS failed_scam,
             COUNT(*) FILTER (WHERE
                 is_active AND is_canonical
-                AND title IS NOT NULL AND description IS NOT NULL AND company_id IS NOT NULL
-                AND (location_city IS NOT NULL OR location_country IS NOT NULL)
+                AND title IS NOT NULL AND title != ''
+                AND description IS NOT NULL AND length(description) >= 20
+                AND location_raw IS NOT NULL AND location_raw != ''
+                AND company_id IS NOT NULL
                 AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
                 AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
-                AND (quality_score IS NULL OR quality_score >= 0.20)
+                AND quality_score IS NOT NULL AND quality_score >= 0.60
                 AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
             ) AS live_jobs
         FROM jobs
@@ -365,16 +367,22 @@ async def job_crawl_breakdown(
     """), {"from_dt": f, "to_dt": t})
     r = result.one()
 
-    # Quality breakdown of live jobs (all time, not filtered)
+    # Quality breakdown of live jobs — same strict criteria as live_jobs count
     quality_result = await db.execute(text("""
         SELECT
             COUNT(*) FILTER (WHERE quality_score >= 0.8) AS quality_a,
             COUNT(*) FILTER (WHERE quality_score >= 0.6 AND quality_score < 0.8) AS quality_b,
-            COUNT(*) FILTER (WHERE quality_score >= 0.4 AND quality_score < 0.6) AS quality_c,
-            COUNT(*) FILTER (WHERE quality_score < 0.4 OR quality_score IS NULL) AS quality_d,
             COUNT(*) AS total_live
         FROM jobs
         WHERE is_active AND is_canonical
+          AND title IS NOT NULL AND title != ''
+          AND description IS NOT NULL AND length(description) >= 20
+          AND location_raw IS NOT NULL AND location_raw != ''
+          AND company_id IS NOT NULL
+          AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
+          AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
+          AND quality_score IS NOT NULL AND quality_score >= 0.60
+          AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
     """))
     q = quality_result.one()
 
@@ -389,8 +397,8 @@ async def job_crawl_breakdown(
         "quality_breakdown": {
             "A_complete": {"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)},
             "B_missing_location": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
-            "C_fair": {"count": q.quality_c, "pct": round(100 * q.quality_c / max(q.total_live, 1), 1)},
-            "D_poor": {"count": q.quality_d, "pct": round(100 * q.quality_d / max(q.total_live, 1), 1)},
+            "C_fair": {"count": 0, "pct": 0},
+            "D_poor": {"count": 0, "pct": 0},
             "total": q.total_live,
         }
     }
