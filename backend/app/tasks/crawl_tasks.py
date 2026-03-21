@@ -980,21 +980,28 @@ def mark_inactive_jobs():
                 logger.info(f"Marked {removed} jobs as inactive (not seen in 7+ days)")
 
 
-@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2, soft_time_limit=90, time_limit=120)
-def rescue_job_locations(self, limit: int = 200):
-    """Fetch job detail pages IN PARALLEL to fill missing location + description.
+@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=1, soft_time_limit=90, time_limit=120)
+def rescue_job_locations(self, limit: int = 100):
+    """Fetch job detail pages to fill missing location + description.
 
-    Uses asyncio.gather with concurrency=30 for ~30x speedup vs sequential.
-    Targets jobs missing location_raw OR with short descriptions.
+    Uses a 3-layer escalation:
+      Layer 1: Plain HTTP + schema.org/heuristic (fast, ~0.5s/job)
+      Layer 2: Playwright JS rendering + heuristic (for JS-heavy pages, ~3s/job)
+      Layer 3: LLM extraction via Ollama (for pages where heuristics fail, ~5s/job)
+
+    Runs every 1 minute with parallel fetching (20 concurrent).
     """
 
     async def _run():
         import asyncio
+        import httpx
+        import json as _json
         from app.db.base import AsyncSessionLocal
         from app.models.job import Job
         from app.crawlers.http_client import ResilientHTTPClient
         from app.crawlers.job_extractor import JobExtractor
         from app.utils.location_parser import location_normalizer
+        from app.core.config import settings
         from sqlalchemy import select, or_, func, text as sa_text
         from markdownify import markdownify
         from urllib.parse import urlparse
@@ -1016,63 +1023,124 @@ def rescue_job_locations(self, limit: int = 200):
             ))
 
             if not jobs:
+                logger.info("rescue_job_locations: nothing to do")
                 return 0
 
             client = ResilientHTTPClient(timeout=15)
             extractor = JobExtractor(db)
             updated = 0
-            sem = asyncio.Semaphore(30)
+            sem = asyncio.Semaphore(15)
+
+            ollama_host = getattr(settings, "OLLAMA_HOST", "ollama")
+
+            async def _extract_location_llm(text_content: str, url: str) -> str | None:
+                """Layer 3: Ask LLM to extract location from page text."""
+                try:
+                    prompt = (
+                        f"Extract the job location from this job posting page.\n"
+                        f"URL: {url}\n"
+                        f"Return ONLY the location as a short string (e.g. 'Sydney, NSW, Australia' "
+                        f"or 'Remote' or 'London, UK'). If no location found, return 'NONE'.\n\n"
+                        f"Page text (first 2000 chars):\n{text_content[:2000]}\n\nLocation:"
+                    )
+                    async with httpx.AsyncClient(timeout=20) as http:
+                        r = await http.post(
+                            f"http://{ollama_host}:11434/api/generate",
+                            json={
+                                "model": "qwen2.5:3b",
+                                "prompt": prompt,
+                                "stream": False,
+                                "options": {"temperature": 0.1, "num_predict": 50},
+                            },
+                        )
+                        if r.status_code != 200:
+                            return None
+                        raw = r.json().get("response", "").strip().strip('"').strip("'")
+                        if raw and raw.upper() != "NONE" and len(raw) < 100 and len(raw) > 2:
+                            return raw
+                except Exception:
+                    pass
+                return None
 
             async def _rescue_one(job):
                 nonlocal updated
                 try:
-                    async with sem:
-                        resp = await client.get(job.source_url, timeout=15)
-                        if not resp or resp.status_code != 200:
-                            return
-                        html = resp.text
-
                     needs_loc = not job.location_raw
                     needs_desc = not job.description or len(job.description) < 100
+                    if not needs_loc and not needs_desc:
+                        return
 
-                    # Extract location from detail page
-                    if needs_loc:
-                        loc_raw = None
-                        # Schema.org
-                        for r in extractor._extract_structured_data(html, job.source_url):
-                            if r.get("location_raw"):
-                                loc_raw = r["location_raw"]
-                                break
-                        # Heuristic
-                        if not loc_raw:
-                            heuristics = extractor._extract_heuristic_single_job(html, job.source_url)
-                            if heuristics:
-                                for h in heuristics:
-                                    if h.get("location_raw"):
-                                        loc_raw = h["location_raw"]
-                                        break
-                        # URL pattern
-                        if not loc_raw:
-                            import re as _re
-                            url_m = _re.search(r'/jobs?/([a-z][a-z\-]{2,30})/[^/]', urlparse(job.source_url).path, _re.I)
-                            if url_m:
-                                candidate = url_m.group(1).replace("-", " ").strip().title()
-                                _skip = {"All","Search","View","Apply","New","List","Category","Remote","Hybrid"}
-                                if candidate not in _skip and len(candidate) > 2:
-                                    loc_raw = candidate
+                    html = None
+                    loc_raw = None
 
-                        if loc_raw and loc_raw.strip().lower() not in extractor._GARBAGE_LOCATIONS:
+                    async with sem:
+                        # ── Layer 1: Plain HTTP fetch ──────────────────────
+                        try:
+                            resp = await client.get(job.source_url, timeout=12)
+                            if resp and resp.status_code == 200:
+                                html = resp.text
+                        except Exception:
+                            pass
+
+                        # Try extraction from plain HTML
+                        if html and needs_loc:
+                            for r in extractor._extract_structured_data(html, job.source_url):
+                                if r.get("location_raw"):
+                                    loc_raw = r["location_raw"]
+                                    break
+                            if not loc_raw:
+                                h = extractor._extract_heuristic_single_job(html, job.source_url)
+                                if h:
+                                    first = h[0] if isinstance(h, list) and h else h
+                                    if isinstance(first, dict):
+                                        loc_raw = first.get("location_raw")
+
+                        # ── Layer 2: Playwright JS rendering ──────────────
+                        if needs_loc and not loc_raw:
+                            try:
+                                rendered = await client.get_rendered(job.source_url)
+                                if rendered and len(rendered) > len(html or ""):
+                                    html = rendered
+                                    for r in extractor._extract_structured_data(html, job.source_url):
+                                        if r.get("location_raw"):
+                                            loc_raw = r["location_raw"]
+                                            break
+                                    if not loc_raw:
+                                        h = extractor._extract_heuristic_single_job(html, job.source_url)
+                                        if h:
+                                            first = h[0] if isinstance(h, list) and h else h
+                                            if isinstance(first, dict):
+                                                loc_raw = first.get("location_raw")
+                            except Exception:
+                                pass
+
+                        # ── Layer 3: LLM extraction ───────────────────────
+                        if needs_loc and not loc_raw and html:
+                            try:
+                                page_text = markdownify(html[:8000], strip=["script","style","nav","footer"])
+                                loc_raw = await _extract_location_llm(page_text, job.source_url)
+                            except Exception:
+                                pass
+
+                    # Apply location if found
+                    if loc_raw and needs_loc:
+                        if hasattr(extractor, "_GARBAGE_LOCATIONS") and loc_raw.strip().lower() in extractor._GARBAGE_LOCATIONS:
+                            loc_raw = None
+                        if loc_raw:
                             job.location_raw = loc_raw
                             market = getattr(job, "location_country", "AU") or "AU"
-                            parsed = location_normalizer.normalize(loc_raw, market)
-                            if parsed:
-                                job.location_city = job.location_city or parsed.city
-                                job.location_state = job.location_state or parsed.state
-                                job.location_country = job.location_country or parsed.country
-                                job.is_remote = job.is_remote if job.is_remote is not None else parsed.is_remote
+                            try:
+                                parsed = location_normalizer.normalize(loc_raw, market)
+                                if parsed:
+                                    job.location_city = job.location_city or parsed.city
+                                    job.location_state = job.location_state or parsed.state
+                                    job.location_country = job.location_country or parsed.country
+                                    job.is_remote = job.is_remote if job.is_remote is not None else parsed.is_remote
+                            except Exception:
+                                pass
                             updated += 1
 
-                    # Enrich description from detail page
+                    # Enrich description
                     if needs_desc and html:
                         try:
                             md = markdownify(html[:12000], strip=["script","style","nav","header","footer"])
@@ -1083,26 +1151,18 @@ def rescue_job_locations(self, limit: int = 200):
                         except Exception:
                             pass
 
-                    # Fill employment_type
-                    if not job.employment_type:
-                        for r in extractor._extract_structured_data(html, job.source_url):
-                            emp = extractor._normalize_employment_type(r.get("employment_type"))
-                            if emp:
-                                job.employment_type = emp
-                                break
-
-                    # Rescore inline
+                    # Reset score for re-evaluation
                     job.quality_score = None
                     job.quality_scored_at = None
 
                 except Exception:
                     pass
 
-            # Parallel fetch all jobs
+            # Run in parallel
             await asyncio.gather(*[_rescue_one(j) for j in jobs])
             await db.commit()
 
-            # Rescore all rescued jobs
+            # Bulk rescore
             job_ids = [str(j.id) for j in jobs]
             if job_ids:
                 await db.execute(sa_text("""
@@ -1138,7 +1198,7 @@ def rescue_job_locations(self, limit: int = 200):
                 """), {"ids": job_ids})
                 await db.commit()
 
-            logger.info(f"rescue_job_locations: updated {updated}/{len(jobs)} jobs (parallel)")
+            logger.info(f"rescue_job_locations: updated {updated}/{len(jobs)} (L1+L2+L3)")
             return updated
 
     return _run_async(_run())

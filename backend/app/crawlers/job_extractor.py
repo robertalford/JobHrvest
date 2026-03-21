@@ -96,43 +96,102 @@ class JobExtractor:
             src = job_data.get("source_url", "")
             has_loc = bool(job_data.get("location_raw"))
             has_desc = bool(job_data.get("description")) and len(job_data.get("description", "")) >= 100
-            # Skip if already complete or URL is the listing page itself
             if (has_loc and has_desc) or not src or src == career_page.url:
                 return job_data
             try:
-                resp = await self.client.get(src, timeout=12)
-                if not resp or resp.status_code != 200:
-                    return job_data
-                detail_html = resp.text
-                # Extract structured data from detail page
-                detail_jobs = self._extract_structured_data(detail_html, src)
-                detail = detail_jobs[0] if detail_jobs else {}
-                # Fill location
-                if not has_loc:
-                    loc = detail.get("location_raw", "")
+                import httpx as _httpx
+                from app.core.config import settings as _settings
+                from markdownify import markdownify as _md
+
+                detail_html = None
+                loc = None
+
+                # ── Layer 1: Plain HTTP ───────────────────────────
+                try:
+                    resp = await self.client.get(src, timeout=12)
+                    if resp and resp.status_code == 200:
+                        detail_html = resp.text
+                except Exception:
+                    pass
+
+                # Try structured extraction
+                if detail_html and not has_loc:
+                    for r in self._extract_structured_data(detail_html, src):
+                        if r.get("location_raw"):
+                            loc = r["location_raw"]
+                            break
                     if not loc:
                         h = self._extract_heuristic_single_job(detail_html, src)
                         if h:
-                            loc = h[0].get("location_raw", "") if isinstance(h, list) and h else (h.get("location_raw", "") if isinstance(h, dict) else "")
-                    if loc and loc.strip().lower() not in self._GARBAGE_LOCATIONS:
+                            first = h[0] if isinstance(h, list) and h else h
+                            if isinstance(first, dict):
+                                loc = first.get("location_raw")
+
+                # ── Layer 2: Playwright JS rendering ──────────────
+                if not has_loc and not loc:
+                    try:
+                        rendered = await self.client.get_rendered(src)
+                        if rendered and len(rendered) > len(detail_html or ""):
+                            detail_html = rendered
+                            for r in self._extract_structured_data(detail_html, src):
+                                if r.get("location_raw"):
+                                    loc = r["location_raw"]
+                                    break
+                            if not loc:
+                                h = self._extract_heuristic_single_job(detail_html, src)
+                                if h:
+                                    first = h[0] if isinstance(h, list) and h else h
+                                    if isinstance(first, dict):
+                                        loc = first.get("location_raw")
+                    except Exception:
+                        pass
+
+                # ── Layer 3: LLM extraction ───────────────────────
+                if not has_loc and not loc and detail_html:
+                    try:
+                        page_text = _md(detail_html[:8000], strip=["script","style","nav","footer"])
+                        ollama_host = getattr(_settings, "OLLAMA_HOST", "ollama")
+                        async with _httpx.AsyncClient(timeout=20) as http:
+                            r = await http.post(
+                                f"http://{ollama_host}:11434/api/generate",
+                                json={
+                                    "model": "qwen2.5:3b",
+                                    "prompt": (
+                                        f"Extract the job location from this page. "
+                                        f"Return ONLY the location (e.g. 'Sydney, NSW' or 'Remote'). "
+                                        f"If none found return 'NONE'.\n\n{page_text[:2000]}\n\nLocation:"
+                                    ),
+                                    "stream": False,
+                                    "options": {"temperature": 0.1, "num_predict": 50},
+                                },
+                            )
+                            if r.status_code == 200:
+                                raw = r.json().get("response", "").strip().strip('"').strip("'")
+                                if raw and raw.upper() != "NONE" and 2 < len(raw) < 100:
+                                    loc = raw
+                    except Exception:
+                        pass
+
+                # Apply location
+                if loc and not has_loc:
+                    if loc.strip().lower() not in self._GARBAGE_LOCATIONS:
                         job_data["location_raw"] = loc
-                        job_data["location_city"] = job_data.get("location_city") or detail.get("location_city")
-                        job_data["location_state"] = job_data.get("location_state") or detail.get("location_state")
-                        job_data["location_country"] = job_data.get("location_country") or detail.get("location_country")
-                # Fill description
-                if not has_desc:
-                    desc = detail.get("description", "")
-                    if not desc or len(desc) < 100:
-                        from markdownify import markdownify as _md
-                        try:
-                            desc = _md(detail_html[:12000], strip=["script","style","nav","header","footer"])[:5000].strip()
-                        except Exception:
-                            pass
-                    if desc and len(desc) > len(job_data.get("description") or ""):
-                        job_data["description"] = desc
-                # Fill employment type
-                if not job_data.get("employment_type") and detail.get("employment_type"):
-                    job_data["employment_type"] = detail["employment_type"]
+
+                # Fill description (from best HTML available)
+                if not has_desc and detail_html:
+                    try:
+                        desc = _md(detail_html[:12000], strip=["script","style","nav","header","footer"])[:5000].strip()
+                        if desc and len(desc) > len(job_data.get("description") or ""):
+                            job_data["description"] = desc
+                    except Exception:
+                        pass
+
+                # Fill employment type from structured data
+                if not job_data.get("employment_type") and detail_html:
+                    for r in self._extract_structured_data(detail_html, src):
+                        if r.get("employment_type"):
+                            job_data["employment_type"] = r["employment_type"]
+                            break
             except Exception:
                 pass
             return job_data
