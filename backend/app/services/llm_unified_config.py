@@ -260,7 +260,7 @@ class LLMUnifiedConfig:
     async def _ask_llm(self, prompt: str, max_tokens: int = 300) -> str | None:
         """Send prompt to Ollama and return response text."""
         try:
-            async with httpx.AsyncClient(timeout=45) as http:
+            async with httpx.AsyncClient(timeout=90) as http:
                 r = await http.post(
                     self.ollama_url,
                     json={
