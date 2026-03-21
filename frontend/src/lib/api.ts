@@ -193,3 +193,6 @@ export const triggerGeoSeed   = (countries?: string[]) =>
   api.post('/geocoder/seed/', countries ? { countries } : {}).then(r => r.data);
 export const triggerRetroGeocode = (retry_failed = false) =>
   api.post('/geocoder/retro/', null, { params: { retry_failed } }).then(r => r.data);
+
+export const getLiveTimeline = (minutes = 30) =>
+  api.get('/jobs/live-timeline', { params: { minutes } }).then(r => r.data);

@@ -698,6 +698,40 @@ async def export_jobs(
                     headers={"Content-Disposition": "attachment; filename=jobs.csv"})
 
 
+
+
+@router.get("/live-timeline")
+async def live_timeline(
+    minutes: int = Query(30, ge=5, le=1440),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-minute count of jobs that passed quality gate, for the last N minutes."""
+    from sqlalchemy import text
+
+    result = await db.execute(text("""
+        SELECT
+            date_trunc('minute', created_at) AS minute,
+            COUNT(*) AS total_created,
+            COUNT(*) FILTER (WHERE quality_score > 0) AS live_count
+        FROM jobs
+        WHERE created_at >= NOW() - make_interval(mins => :minutes)
+        GROUP BY 1
+        ORDER BY 1
+    """), {"minutes": minutes})
+
+    rows = result.fetchall()
+    return {
+        "minutes": minutes,
+        "data": [
+            {
+                "minute": row.minute.isoformat(),
+                "total": row.total_created,
+                "live": row.live_count,
+            }
+            for row in rows
+        ]
+    }
+
 @router.get("/{job_id}")
 async def get_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
     job = await db.get(Job, job_id)

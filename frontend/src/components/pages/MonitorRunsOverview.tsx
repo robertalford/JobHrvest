@@ -4,13 +4,14 @@
  */
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getQueueStats, getJobCrawlBreakdown, triggerRun } from '../../lib/api';
+import { getQueueStats, getJobCrawlBreakdown, triggerRun, getLiveTimeline } from '../../lib/api';
 import { Link } from 'react-router-dom';
 import {
   Globe, Building2, Search, Activity, Briefcase,
   Clock, Loader2, CheckCircle, XCircle, Play, ArrowRight,
-  FileX, Ban, Copy, CalendarOff, ShieldAlert,
+  FileX, Ban, Copy, CalendarOff, ShieldAlert, TrendingUp,
 } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 /* ── Date range helpers ──────────────────────────────────────────── */
 
@@ -246,8 +247,47 @@ function QualityBreakdownCard({ breakdown }: { breakdown: CrawlBreakdownData['qu
 
 /* ── Main component ──────────────────────────────────────────────── */
 
+
+function ChartTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-2 text-sm">
+      <div className="font-medium text-gray-900">{label}</div>
+      <div className="text-green-600">{payload[0]?.value?.toLocaleString()} live jobs</div>
+    </div>
+  );
+}
+
 export function MonitorRunsOverview() {
   const qc = useQueryClient();
+  const [chartMinutes, setChartMinutes] = useState(30);
+
+  const CHART_PERIODS = [
+    { label: '5m', value: 5 },
+    { label: '15m', value: 15 },
+    { label: '30m', value: 30 },
+    { label: '1h', value: 60 },
+    { label: '3h', value: 180 },
+    { label: '6h', value: 360 },
+    { label: '12h', value: 720 },
+    { label: '24h', value: 1440 },
+  ];
+
+  const { data: timelineData } = useQuery({
+    queryKey: ['live-timeline', chartMinutes],
+    queryFn: () => getLiveTimeline(chartMinutes),
+    refetchInterval: 5000,
+  });
+
+  const chartData = useMemo(() => {
+    if (!timelineData?.data) return [];
+    return timelineData.data.map((d: { minute: string; live: number; total: number }) => ({
+      time: new Date(d.minute).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+      live: d.live,
+      total: d.total,
+    }));
+  }, [timelineData]);
+
 
   const [range, setRange] = useState<{ from: string; to: string }>(() => {
     const now = new Date();
@@ -461,6 +501,55 @@ export function MonitorRunsOverview() {
           <h2 className="text-lg font-semibold text-gray-900">Jobs Crawled</h2>
           <span className="text-xs text-gray-400 ml-2">Extraction results for selected date range</span>
         </div>
+
+        {/* Live Jobs Per Minute Chart */}
+        <div className="card p-5">
+          {/* Period selector */}
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-green-600" />
+              <span className="text-sm font-medium text-gray-700">Live Jobs Per Minute</span>
+            </div>
+            <div className="flex gap-1">
+              {CHART_PERIODS.map(p => (
+                <button
+                  key={p.value}
+                  onClick={() => setChartMinutes(p.value)}
+                  className={`w-10 py-1 text-xs rounded-md font-medium text-center transition-colors ${
+                    chartMinutes === p.value
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Chart */}
+          <ResponsiveContainer width="100%" height={250}>
+            <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis
+                dataKey="time"
+                tick={{ fontSize: 11, fill: '#9ca3af' }}
+                interval={Math.max(0, Math.floor(chartData.length / 10) - 1)}
+              />
+              <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} />
+              <Tooltip content={<ChartTooltip />} />
+              <Line
+                type="monotone"
+                dataKey="live"
+                stroke="#16a34a"
+                strokeWidth={2}
+                dot={{ r: 3, fill: '#16a34a', strokeWidth: 0 }}
+                activeDot={{ r: 5, fill: '#16a34a', stroke: '#fff', strokeWidth: 2 }}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+
 
         {crawlLoading || !crawlBreakdown ? (
           <div className="flex items-center justify-center py-12 text-gray-400">
