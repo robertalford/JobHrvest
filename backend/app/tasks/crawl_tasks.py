@@ -669,7 +669,7 @@ def drain_company_config():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=20)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=300)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]
@@ -698,7 +698,7 @@ def drain_site_config():
 def drain_job_crawling():
     """Drain job_crawling queue: claim batch and send to Celery.
 
-    Runs every 5 seconds (beat) with batch_size=250.
+    Runs every 5 seconds (beat) with batch_size=3050.
     At 160 workers × 5s/page = 32 pages/s throughput → 50k sites in ~26 min.
     """
     async def _run():
@@ -1823,7 +1823,7 @@ def llm_unified_company_config(self, company_id: str, queue_item_id: str = None)
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.models.company import Company
-        from app.services.llm_unified_config import LLMUnifiedConfig
+        from app.services.hybrid_unified_config import HybridUnifiedConfig
         from app.services import queue_manager
         from app.core.config import settings
 
@@ -1836,7 +1836,7 @@ def llm_unified_company_config(self, company_id: str, queue_item_id: str = None)
                 return
 
             try:
-                config = LLMUnifiedConfig(
+                config = HybridUnifiedConfig(
                     db,
                     ollama_host=getattr(settings, "OLLAMA_HOST", "ollama"),
                     model=getattr(settings, "OLLAMA_FAST_MODEL", "qwen2.5:3b"),
@@ -1873,7 +1873,7 @@ def drain_llm_unified():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
         async with AsyncSessionLocal() as db:
-            items = await queue_manager.claim_batch(db, "company_config", batch_size=2)
+            items = await queue_manager.claim_batch(db, "company_config", batch_size=30)
             await db.commit()
             for row in items:
                 queue_item_id, company_id = row[0], row[1]
