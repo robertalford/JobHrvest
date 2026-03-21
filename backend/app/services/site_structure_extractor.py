@@ -43,6 +43,8 @@ class SiteStructureExtractor:
         "jobs.lever.co", "jobs.ashbyhq.com", "myworkdayjobs.com",
         ".bamboohr.com", "jobs.jobvite.com", "careers.smartrecruiters.com",
         "icims.com", "pageuppeople.com", "applynow.net.au",
+        ".teamtailor.com", "breezy.hr", "recruitee.com",
+        "jobs.lever.co", "apply.workable.com",
     ]
     # JS-only ATS platforms — also set requires_js_rendering flag
     _JS_ONLY_ATS = frozenset(["workday", "icims", "taleo"])

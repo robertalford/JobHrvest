@@ -592,6 +592,9 @@ def fix_site_structure(self, career_page_id: str, queue_item_id: str = None):
                 "/saved-jobs", "/job-alerts", "/sign-in", "/login",
                 "/register", "/forgot-password", "/content/dam/",
                 "mailto:", "javascript:", "#content",
+                "show_more?page=", "&rmuh=", "index.cfm?event=",
+                "/signin", "/create_account", "in_organId=",
+                "posbrowser_resetto", "?in_sessionid=",
             ]
             if any(p in _url for p in _BAD_PATTERNS):
                 from sqlalchemy import text as _text_bad

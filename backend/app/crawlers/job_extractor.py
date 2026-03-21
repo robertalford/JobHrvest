@@ -1346,6 +1346,21 @@ class JobExtractor:
         if title.lower().rstrip(".!?") in self._JUNK_TITLES and not description:
             return None
 
+        # Reject page-level titles (listing pages treated as individual jobs)
+        _title_lower = title.lower()
+        _PAGE_TITLE_SIGNALS = [
+            'careers at ', 'careers portal', 'careers home', 'career opportunities',
+            'job openings', 'jobs list', 'open positions', 'job vacancies',
+            'current openings', 'work with us', 'join our team', 'join us',
+            'positions available', 'career portal', 'careers -', '- careers',
+            'current job openings', 'all jobs', 'browse jobs', 'search jobs',
+            'find jobs', 'view all jobs', 'our opportunities', 'employment opportunities',
+            'aps careers', 'early careers', 'driver careers',
+        ]
+        if any(sig in _title_lower for sig in _PAGE_TITLE_SIGNALS):
+            logger.debug(f"Rejected page-level title: {title[:60]}")
+            return None
+
         # Structural extractions with no description and very short titles are likely nav links
         if data.get("extraction_method") == "structural" and not description and len(title.split()) <= 2:
             return None
@@ -1355,6 +1370,21 @@ class JobExtractor:
             page_url = page.url if page else ""
             if not self._is_likely_job_url(source_url, page_url or source_url):
                 logger.debug(f"Rejected job: non-job URL pattern {source_url} ({data.get('extraction_method')})")
+                return None
+
+            # Reject listing-page-as-job: if source_url is the career page URL itself
+            if source_url == page_url:
+                logger.debug(f"Rejected job: source_url is the listing page itself {source_url}")
+                return None
+
+            # Reject pagination/AJAX URLs
+            _src_lower = source_url.lower()
+            if any(p in _src_lower for p in [
+                'show_more?page=', 'pagestamp=', '&rmuh=',
+                '/login', '/signin', '/register', '/forgot-password',
+                'index.cfm?event=jobs.listjobs',
+            ]):
+                logger.debug(f"Rejected job: pagination/login URL {source_url}")
                 return None
 
         # Find existing job
