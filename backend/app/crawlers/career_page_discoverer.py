@@ -146,7 +146,8 @@ class CareerPageDiscoverer:
                 if _JOB_DETAIL_PATH_RE.search(urlparse(url).path + "?" + urlparse(url).query):
                     continue
                 page = await self._upsert_career_page(company, url, meta)
-                pages.append(page)
+                if page:
+                    pages.append(page)
 
         logger.info(f"Discovered {len(pages)} career pages for {company.domain}")
         return pages
@@ -294,6 +295,7 @@ class CareerPageDiscoverer:
                     continue
 
                 link_text = a.get_text(strip=True).lower()
+                abs_url = self._normalize_discovered_url(abs_url)
                 score = self._score_url(abs_url, link_text)
 
                 if score > 0:
@@ -322,6 +324,24 @@ class CareerPageDiscoverer:
                     "requires_js": url in js_required,
                 })
         return results
+
+    def _normalize_discovered_url(self, url: str) -> str:
+        """Normalize discovered URLs before scoring — redirect known patterns to canonical URLs."""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+
+        # TeamTailor: /stories, /departments, /connect → redirect to /jobs
+        if '.teamtailor.com' in host:
+            if parsed.path in ('/stories', '/departments', '/connect', '/people', '/'):
+                return f"{parsed.scheme}://{parsed.netloc}/jobs"
+
+        # NGA (Australian Gov ATS): normalize complex index.cfm URLs to base
+        if '.nga.net.au' in host or '.nga.net.nz' in host:
+            if 'index.cfm' in parsed.path:
+                return f"{parsed.scheme}://{parsed.netloc}/cp/"
+
+        return url
 
     def _score_url(self, url: str, link_text: str) -> float:
         """Score a URL on how likely it is to be a careers page. Returns 0.0–1.0."""
@@ -408,8 +428,52 @@ class CareerPageDiscoverer:
 
         return False
 
+    # URLs that should never be saved as career pages
+    _BAD_URL_PATTERNS = [
+        'show_more?page=', '&rmuh=', 'index.cfm?event=jobs.listjobs',
+        'pagestamp=', 'in_organId=', 'in_sessionid=', 'posbrowser_resetto',
+        '/login', '/signin', '/sign-in', '/register', '/forgot-password',
+        'create_account', '/wechat/ShareJob', '/wechat/share',
+        '/saved-jobs', '/job-alerts', 'mailto:', 'javascript:',
+        '#content', '/content/dam/', 'show_more?', '&in_create_account',
+    ]
+
+    def _normalize_career_url(self, url: str) -> str | None:
+        """Normalize and validate a career page URL. Returns None if URL is bad."""
+        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+        # Reject bad patterns
+        url_lower = url.lower()
+        if any(p in url_lower for p in self._BAD_URL_PATTERNS):
+            logger.debug(f"Rejected bad career page URL: {url[:80]}")
+            return None
+
+        # Strip common tracking/session params
+        parsed = urlparse(url)
+        if parsed.query:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            # Remove session/tracking params
+            clean_params = {k: v for k, v in params.items()
+                          if k.lower() not in ('rmuh', 'pagestamp', 'in_sessionid',
+                                                'utm_source', 'utm_medium', 'utm_campaign',
+                                                'utm_term', 'utm_content', 'fbclid', 'gclid')}
+            clean_query = urlencode(clean_params, doseq=True)
+            url = urlunparse(parsed._replace(query=clean_query))
+
+        # Strip trailing fragments
+        if '#' in url:
+            url = url.split('#')[0]
+
+        return url.rstrip('/')
+
     async def _upsert_career_page(self, company: Company, url: str, meta: dict) -> CareerPage:
         from sqlalchemy import select
+
+        # Validate and normalize URL before saving
+        url = self._normalize_career_url(url)
+        if not url:
+            return None
+
         existing = await self.db.scalar(
             select(CareerPage).where(CareerPage.company_id == company.id, CareerPage.url == url)
         )
