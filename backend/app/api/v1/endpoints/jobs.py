@@ -79,7 +79,7 @@ async def job_stats(db: AsyncSession = Depends(get_db)):
                   AND is_canonical
                   AND title IS NOT NULL AND title != ''
                   AND company_id IS NOT NULL
-                  AND description IS NOT NULL AND length(description) >= 200
+                  AND description IS NOT NULL AND length(description) >= 100
                   AND location_raw IS NOT NULL AND location_raw != ''
                   AND geo_resolved = true
                   AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
@@ -339,7 +339,7 @@ async def job_crawl_breakdown(
     PASS_GATE = """
         title IS NOT NULL AND title != ''
         AND company_id IS NOT NULL
-        AND description IS NOT NULL AND length(description) >= 200
+        AND description IS NOT NULL AND length(description) >= 100
         AND location_raw IS NOT NULL AND location_raw != ''
         AND geo_resolved = true
         AND is_canonical = true
@@ -355,7 +355,7 @@ async def job_crawl_breakdown(
             COUNT(*) FILTER (WHERE
                 (title IS NULL OR title = '') OR
                 company_id IS NULL OR
-                (description IS NULL OR length(description) < 200) OR
+                (description IS NULL OR length(description) < 100) OR
                 (location_raw IS NULL OR location_raw = '' OR geo_resolved IS NOT TRUE)
             ) AS failed_core_fields,
             COUNT(*) FILTER (WHERE (quality_flags->>'bad_words_detected')::boolean IS TRUE) AS failed_bad_words,

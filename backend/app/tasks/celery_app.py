@@ -123,8 +123,8 @@ celery_app.conf.update(
         },
         "rescue-job-locations": {
             "task": "crawl.rescue_job_locations",
-            "schedule": 2 * 60,
-            "kwargs": {"limit": 200},
+            "schedule": 60,
+            "kwargs": {"limit": 500},
             "options": {"queue": "default"},
         },
     },

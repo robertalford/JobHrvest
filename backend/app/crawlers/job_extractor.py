@@ -1317,7 +1317,7 @@ class JobExtractor:
                     WHEN NOT (
                         title IS NOT NULL AND title != ''
                         AND company_id IS NOT NULL
-                        AND description IS NOT NULL AND length(description) >= 200
+                        AND description IS NOT NULL AND length(description) >= 100
                         AND location_raw IS NOT NULL AND location_raw != ''
                         AND geo_resolved = true
                         AND is_canonical = true

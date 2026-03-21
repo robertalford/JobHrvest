@@ -980,30 +980,26 @@ def mark_inactive_jobs():
                 logger.info(f"Marked {removed} jobs as inactive (not seen in 7+ days)")
 
 
-@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2, soft_time_limit=180, time_limit=210)
-def rescue_job_locations(self, limit: int = 300):
-    """
-    Fetch individual job detail pages for jobs that have no location_raw.
+@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2, soft_time_limit=120, time_limit=150)
+def rescue_job_locations(self, limit: int = 200):
+    """Fetch job detail pages IN PARALLEL to fill missing location + description.
 
-    Works through jobs in batches — for each job, fetches the source_url
-    and re-runs schema.org + heuristic extraction to fill location
-    (and employment_type if also missing).  Updates the job record in place.
-
-    Runs automatically on schedule; can also be triggered via the API.
+    Uses asyncio.gather with concurrency=30 for ~30x speedup vs sequential.
+    Targets jobs missing location_raw OR with short descriptions.
     """
 
     async def _run():
+        import asyncio
         from app.db.base import AsyncSessionLocal
         from app.models.job import Job
-        from app.models.company import Company
-        from app.crawlers.job_extractor import JobExtractor
         from app.crawlers.http_client import ResilientHTTPClient
+        from app.crawlers.job_extractor import JobExtractor
         from app.utils.location_parser import location_normalizer
-        from sqlalchemy import select
+        from sqlalchemy import select, or_, func, text as sa_text
+        from markdownify import markdownify
+        from urllib.parse import urlparse
 
         async with AsyncSessionLocal() as db:
-            # Fetch jobs missing location OR with short descriptions
-            from sqlalchemy import or_, func
             jobs = list(await db.scalars(
                 select(Job)
                 .where(
@@ -1011,7 +1007,7 @@ def rescue_job_locations(self, limit: int = 300):
                     Job.source_url.isnot(None),
                     or_(
                         Job.location_raw.is_(None),
-                        func.length(Job.description) < 200,
+                        func.length(Job.description) < 100,
                         Job.description.is_(None),
                     ),
                 )
@@ -1020,115 +1016,132 @@ def rescue_job_locations(self, limit: int = 300):
             ))
 
             if not jobs:
-                logger.info("rescue_job_locations: nothing to do")
                 return 0
 
-            client = ResilientHTTPClient()
+            client = ResilientHTTPClient(timeout=15)
             extractor = JobExtractor(db)
             updated = 0
-            failed = 0
+            sem = asyncio.Semaphore(30)
 
-            import re
-            from urllib.parse import urlparse
-            # Regex to pull city from common ATS URL patterns like /job/{city}/ or /{city}/jobs/
-            _URL_CITY_RE = re.compile(
-                r'/jobs?/([a-z][a-z\-]{2,30})/[^/]',
-                re.IGNORECASE,
-            )
-            _NOT_CITY = frozenset(["all", "search", "view", "apply", "new", "list", "category",
-                                   "openings", "positions", "full", "part", "remote", "hybrid"])
-
-            for job in jobs:
+            async def _rescue_one(job):
+                nonlocal updated
                 try:
-                    loc_raw = None
-                    found = {}
+                    async with sem:
+                        resp = await client.get(job.source_url, timeout=15)
+                        if not resp or resp.status_code != 200:
+                            return
+                        html = resp.text
 
-                    # --- Fast path: extract city directly from the URL (no HTTP fetch needed) ---
-                    url_path = urlparse(job.source_url).path
-                    m = _URL_CITY_RE.search(url_path)
-                    if m:
-                        candidate = m.group(1).replace("-", " ").strip().title()
-                        if candidate.lower() not in _NOT_CITY and len(candidate) > 2:
-                            loc_raw = candidate
+                    needs_loc = not job.location_raw
+                    needs_desc = not job.description or len(job.description) < 100
 
-                    # --- Slow path: fetch the page and extract location ---
-                    if not loc_raw:
-                        try:
-                            resp = await client.get(job.source_url, timeout=20)
-                            if resp.status_code in (200, 203):
-                                html = resp.text
-                                # Schema.org first (highest accuracy)
-                                structured = extractor._extract_structured_data(html, job.source_url)
-                                for r in structured:
-                                    if r.get("location_raw"):
-                                        found = r
-                                        loc_raw = r["location_raw"]
+                    # Extract location from detail page
+                    if needs_loc:
+                        loc_raw = None
+                        # Schema.org
+                        for r in extractor._extract_structured_data(html, job.source_url):
+                            if r.get("location_raw"):
+                                loc_raw = r["location_raw"]
+                                break
+                        # Heuristic
+                        if not loc_raw:
+                            heuristics = extractor._extract_heuristic_single_job(html, job.source_url)
+                            if heuristics:
+                                for h in heuristics:
+                                    if h.get("location_raw"):
+                                        loc_raw = h["location_raw"]
                                         break
-                                # Heuristic fallback
-                                if not loc_raw:
-                                    heuristic = extractor._extract_heuristic_single_job(html, job.source_url)
-                                    if heuristic:
-                                        found = heuristic[0]
-                                        loc_raw = found.get("location_raw") or ""
-                        except Exception as fetch_err:
-                            logger.debug(f"rescue fetch failed {job.source_url}: {fetch_err}")
+                        # URL pattern
+                        if not loc_raw:
+                            import re as _re
+                            url_m = _re.search(r'/jobs?/([a-z][a-z\-]{2,30})/[^/]', urlparse(job.source_url).path, _re.I)
+                            if url_m:
+                                candidate = url_m.group(1).replace("-", " ").strip().title()
+                                _skip = {"All","Search","View","Apply","New","List","Category","Remote","Hybrid"}
+                                if candidate not in _skip and len(candidate) > 2:
+                                    loc_raw = candidate
 
-                    # --- Apply extracted location ---
-                    if loc_raw:
-                        company = await db.get(Company, job.company_id)
-                        market = (company.market_code if company else None) or "AU"
-                        parsed = location_normalizer.normalize(loc_raw, market)
-                        job.location_raw = loc_raw
-                        if not job.location_city:
-                            job.location_city = parsed.city
-                        if not job.location_state:
-                            job.location_state = parsed.state
-                        if not job.location_country:
-                            job.location_country = parsed.country
-                        if job.is_remote is None:
-                            job.is_remote = parsed.is_remote
-                        updated += 1
-                        job.quality_score = None
-                        job.quality_scored_at = None
+                        if loc_raw and loc_raw.strip().lower() not in extractor._GARBAGE_LOCATIONS:
+                            job.location_raw = loc_raw
+                            market = getattr(job, "location_country", "AU") or "AU"
+                            parsed = location_normalizer.normalize(loc_raw, market)
+                            if parsed:
+                                job.location_city = job.location_city or parsed.city
+                                job.location_state = job.location_state or parsed.state
+                                job.location_country = job.location_country or parsed.country
+                                job.is_remote = job.is_remote if job.is_remote is not None else parsed.is_remote
+                            updated += 1
 
-                    # Also fill description from detail page if current is short/missing
-                    if found or (resp and resp.status_code == 200):
-                        # Enrich description if short
-                        if not job.description or len(job.description) < 200:
-                            new_desc = found.get("description", "") if found else ""
-                            if not new_desc and resp and resp.status_code == 200:
-                                # Extract description from full page HTML
-                                from markdownify import markdownify
-                                try:
-                                    md = markdownify(html[:10000], strip=["script", "style", "nav", "header", "footer"])
-                                    if len(md) > 200:
-                                        new_desc = md[:5000].strip()
-                                except Exception:
-                                    pass
-                            if new_desc and len(new_desc) > len(job.description or ""):
-                                job.description = new_desc[:5000]
+                    # Enrich description from detail page
+                    if needs_desc and html:
+                        try:
+                            md = markdownify(html[:12000], strip=["script","style","nav","header","footer"])
+                            if len(md) > len(job.description or ""):
+                                job.description = md[:5000].strip()
                                 job.description_enriched_at = datetime.now(timezone.utc)
-                                job.quality_score = None
-                                job.quality_scored_at = None
                                 updated += 1
+                        except Exception:
+                            pass
 
-                    # Also fill employment_type from page extraction if missing
-                    if found:
-                        new_emp = extractor._normalize_employment_type(found.get("employment_type"))
-                        if new_emp and not job.employment_type:
-                            job.employment_type = new_emp
+                    # Fill employment_type
+                    if not job.employment_type:
+                        for r in extractor._extract_structured_data(html, job.source_url):
+                            emp = extractor._normalize_employment_type(r.get("employment_type"))
+                            if emp:
+                                job.employment_type = emp
+                                break
 
-                except Exception as e:
-                    failed += 1
-                    logger.debug(f"rescue_job_locations: failed for {job.source_url}: {e}")
+                    # Rescore inline
+                    job.quality_score = None
+                    job.quality_scored_at = None
 
+                except Exception:
+                    pass
+
+            # Parallel fetch all jobs
+            await asyncio.gather(*[_rescue_one(j) for j in jobs])
             await db.commit()
-            logger.info(f"rescue_job_locations: updated {updated}/{len(jobs)} jobs (failed: {failed})")
+
+            # Rescore all rescued jobs
+            job_ids = [str(j.id) for j in jobs]
+            if job_ids:
+                await db.execute(sa_text("""
+                    UPDATE jobs SET quality_score = CASE
+                        WHEN NOT (
+                            title IS NOT NULL AND title != ''
+                            AND company_id IS NOT NULL
+                            AND description IS NOT NULL AND length(description) >= 100
+                            AND location_raw IS NOT NULL AND location_raw != ''
+                            AND geo_resolved = true
+                            AND is_canonical = true
+                            AND (quality_flags IS NULL OR (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE)
+                            AND (quality_flags IS NULL OR (quality_flags->>'scam_detected')::boolean IS NOT TRUE)
+                            AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+                            AND first_seen_at >= NOW() - INTERVAL '60 days'
+                        ) THEN 0.0
+                        ELSE LEAST(1.0,
+                            0.20
+                            + CASE WHEN length(description) >= 1000 THEN 0.15 WHEN length(description) >= 500 THEN 0.10 ELSE 0.05 END
+                            + CASE WHEN location_city IS NOT NULL AND location_city != '' THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN geo_confidence IS NOT NULL AND geo_confidence >= 0.8 THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN employment_type IS NOT NULL THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN salary_raw IS NOT NULL AND salary_raw != '' THEN 0.10 ELSE 0.0 END
+                            + CASE WHEN seniority_level IS NOT NULL AND seniority_level != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN department IS NOT NULL OR team IS NOT NULL THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN requirements IS NOT NULL AND requirements != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN benefits IS NOT NULL AND benefits != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN application_url IS NOT NULL AND application_url != '' THEN 0.05 ELSE 0.0 END
+                            + CASE WHEN date_posted IS NOT NULL THEN 0.05 ELSE 0.0 END
+                        )
+                    END, quality_scored_at = NOW()
+                    WHERE id = ANY(:ids)
+                """), {"ids": job_ids})
+                await db.commit()
+
+            logger.info(f"rescue_job_locations: updated {updated}/{len(jobs)} jobs (parallel)")
             return updated
 
     return _run_async(_run())
-
-    _run_async(_run())
 
 
 @celery_app.task(name="crawl.score_unscored_jobs", bind=True, max_retries=1)
@@ -1673,7 +1686,7 @@ def enforce_quality_gate():
                         WHEN NOT (
                             title IS NOT NULL AND title != ''
                             AND company_id IS NOT NULL
-                            AND description IS NOT NULL AND length(description) >= 200
+                            AND description IS NOT NULL AND length(description) >= 100
                             AND location_raw IS NOT NULL AND location_raw != ''
                             AND geo_resolved = true
                             AND is_canonical = true
