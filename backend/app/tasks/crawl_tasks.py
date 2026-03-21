@@ -980,7 +980,7 @@ def mark_inactive_jobs():
                 logger.info(f"Marked {removed} jobs as inactive (not seen in 7+ days)")
 
 
-@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2, soft_time_limit=120, time_limit=150)
+@celery_app.task(name="crawl.rescue_job_locations", bind=True, max_retries=2, soft_time_limit=90, time_limit=120)
 def rescue_job_locations(self, limit: int = 200):
     """Fetch job detail pages IN PARALLEL to fill missing location + description.
 
