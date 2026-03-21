@@ -1,6 +1,7 @@
 """Crawl management endpoints."""
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 AEST = ZoneInfo("Australia/Sydney")
@@ -215,10 +216,16 @@ async def trigger_aggregator_harvest():
 
 @router.get("/queue-stats/")
 @router.get("/queue-stats")
-async def get_queue_stats(db: AsyncSession = Depends(get_db)):
-    """Return current queue depths by type and status."""
+async def get_queue_stats(
+    from_dt: Optional[str] = Query(None, description="ISO datetime filter start"),
+    to_dt: Optional[str] = Query(None, description="ISO datetime filter end"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return current queue depths by type and status, optionally filtered by date range."""
     from app.services import queue_manager
-    return await queue_manager.get_stats(db)
+    f = datetime.fromisoformat(from_dt) if from_dt else None
+    t = datetime.fromisoformat(to_dt) if to_dt else None
+    return await queue_manager.get_stats(db, from_dt=f, to_dt=t)
 
 
 @router.post("/trigger/{run_type}/", status_code=202)

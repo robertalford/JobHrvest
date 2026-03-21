@@ -77,6 +77,8 @@ export const exportJobs = (params: Record<string, unknown>) => {
 };
 export const getJob = (id: string) => api.get(`/jobs/${id}`).then(r => r.data);
 export const getJobStats = () => api.get('/jobs/stats').then(r => r.data);
+export const getJobCrawlBreakdown = (params?: Record<string, unknown>) =>
+  api.get('/jobs/crawl-breakdown', { params }).then(r => r.data);
 
 // Crawl
 export const getCrawlStats = () => api.get('/crawl/stats').then(r => r.data);
@@ -174,8 +176,8 @@ export const getMarketBreakdown = () =>
   api.get('/analytics/market-breakdown').then(r => r.data);
 
 // Queue stats (persistent run queue depths)
-export const getQueueStats = () =>
-  api.get('/crawl/queue-stats').then(r => r.data);
+export const getQueueStats = (params?: Record<string, unknown>) =>
+  api.get('/crawl/queue-stats', { params }).then(r => r.data);
 export const resetStaleQueueItems = (staleAfterMinutes = 120) =>
   api.post(`/crawl/queue/reset-stale?stale_after_minutes=${staleAfterMinutes}`).then(r => r.data);
 

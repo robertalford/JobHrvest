@@ -1,18 +1,56 @@
 /**
- * Monitor Runs Overview — one-page summary of all 4 run-type queues.
- * Shows pending/processing/done/failed counts with quick-trigger buttons.
+ * Monitor Runs Overview — one-page summary of all 4 run-type queues
+ * with date range filtering and jobs crawled breakdown.
  */
+import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getQueueStats, getJobStats, triggerRun, resetStaleQueueItems } from '../../lib/api';
+import { getQueueStats, getJobCrawlBreakdown, triggerRun, resetStaleQueueItems } from '../../lib/api';
 import { Link } from 'react-router-dom';
 import {
   Globe, Building2, Search, Activity, Briefcase,
   Clock, Loader2, CheckCircle, XCircle, Play, ArrowRight, RefreshCw,
+  FileX, Ban, Copy, CalendarOff, ShieldAlert, Zap,
 } from 'lucide-react';
 
+/* ── Date range helpers ──────────────────────────────────────────── */
+
+function hoursAgo(h: number): string {
+  return new Date(Date.now() - h * 3600_000).toISOString();
+}
+
+function todayStart(): string {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
+}
+
+const QUICK_RANGES: { label: string; from: () => string }[] = [
+  { label: '1h',    from: () => hoursAgo(1) },
+  { label: '2h',    from: () => hoursAgo(2) },
+  { label: '6h',    from: () => hoursAgo(6) },
+  { label: '12h',   from: () => hoursAgo(12) },
+  { label: '24h',   from: () => hoursAgo(24) },
+  { label: '3d',    from: () => hoursAgo(72) },
+  { label: '7d',    from: () => hoursAgo(168) },
+  { label: 'Today', from: () => todayStart() },
+];
+
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function fromLocalInput(val: string): string {
+  return new Date(val).toISOString();
+}
+
+/* ── Queue type definitions ──────────────────────────────────────── */
+
 interface QueueTypeDef {
-  key: string;       // queue_type key in queue-stats response
-  runType: string;   // value for POST /crawl/trigger/{runType}
+  key: string;
+  runType: string;
   label: string;
   description: string;
   icon: React.ElementType;
@@ -59,6 +97,8 @@ const QUEUE_TYPES: QueueTypeDef[] = [
   },
 ];
 
+/* ── Sub-components ──────────────────────────────────────────────── */
+
 function StatPill({ value, label, colorClass }: { value: number; label: string; colorClass: string }) {
   return (
     <div className="flex flex-col items-center">
@@ -80,14 +120,11 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
   const done       = stats?.done       ?? 0;
   const failed     = stats?.failed     ?? 0;
   const total      = pending + processing + done + failed;
-
-  // Progress bar: percentage of done+failed out of total
   const completedPct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
   const failPct      = total > 0 ? Math.round((failed / total) * 100) : 0;
 
   return (
     <div className="card p-5 flex flex-col gap-4">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
@@ -110,7 +147,6 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
         </button>
       </div>
 
-      {/* Stats row */}
       <div className="grid grid-cols-4 gap-2 py-3 border-y border-gray-100">
         <StatPill value={pending}    label="Pending"    colorClass="text-amber-600" />
         <StatPill value={processing} label="Processing" colorClass="text-blue-600" />
@@ -118,7 +154,6 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
         <StatPill value={failed}     label="Failed"     colorClass="text-red-500" />
       </div>
 
-      {/* Progress bar */}
       <div>
         <div className="flex justify-between text-xs text-gray-400 mb-1">
           <span>{completedPct}% processed</span>
@@ -142,7 +177,6 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
         </div>
       </div>
 
-      {/* Detail link */}
       <Link to={qt.href} className="flex items-center gap-1 text-xs text-blue-600 hover:underline self-end">
         View logs <ArrowRight className="w-3 h-3" />
       </Link>
@@ -150,19 +184,97 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
   );
 }
 
+interface QualityBreakdownEntry {
+  count: number;
+  pct: number;
+}
+
+interface CrawlBreakdownData {
+  total_extracted: number;
+  failed_core_fields: number;
+  failed_bad_words: number;
+  failed_duplicates: number;
+  failed_expired: number;
+  failed_scam: number;
+  live_jobs: number;
+  quality_breakdown: {
+    A_complete: QualityBreakdownEntry;
+    B_missing_location: QualityBreakdownEntry;
+    C_fair: QualityBreakdownEntry;
+    D_poor: QualityBreakdownEntry;
+    total: number;
+  };
+}
+
+function QualityBar({ breakdown }: { breakdown: CrawlBreakdownData['quality_breakdown'] }) {
+  const bands = [
+    { key: 'A', label: 'A - Complete', data: breakdown.A_complete, color: 'bg-green-500' },
+    { key: 'B', label: 'B - Missing Loc', data: breakdown.B_missing_location, color: 'bg-blue-500' },
+    { key: 'C', label: 'C - Fair', data: breakdown.C_fair, color: 'bg-yellow-500' },
+    { key: 'D', label: 'D - Poor', data: breakdown.D_poor, color: 'bg-red-500' },
+  ];
+
+  return (
+    <div className="space-y-2">
+      <div className="h-3 rounded-full overflow-hidden flex bg-gray-100">
+        {bands.map(b => (
+          b.data.pct > 0 ? (
+            <div
+              key={b.key}
+              className={`h-full ${b.color} transition-all`}
+              style={{ width: `${b.data.pct}%` }}
+              title={`${b.label}: ${b.data.count.toLocaleString()} (${b.data.pct}%)`}
+            />
+          ) : null
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        {bands.map(b => (
+          <div key={b.key} className="flex items-center gap-2 text-xs">
+            <span className={`w-2 h-2 rounded-full ${b.color} flex-shrink-0`} />
+            <span className="text-gray-600">{b.label}</span>
+            <span className="ml-auto font-medium text-gray-900">{b.data.count.toLocaleString()}</span>
+            <span className="text-gray-400">({b.data.pct}%)</span>
+          </div>
+        ))}
+      </div>
+      <div className="text-xs text-gray-400 text-right">
+        {breakdown.total.toLocaleString()} total live
+      </div>
+    </div>
+  );
+}
+
+/* ── Main component ──────────────────────────────────────────────── */
+
 export function MonitorRunsOverview() {
   const qc = useQueryClient();
 
+  // Date range state — default 24h
+  const [range, setRange] = useState<{ from: string; to: string }>(() => {
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    return { from: yesterday.toISOString(), to: now.toISOString() };
+  });
+  const [activeQuick, setActiveQuick] = useState<string>('24h');
+
+  const rangeParams = useMemo(() => ({
+    from_dt: range.from,
+    to_dt: range.to,
+  }), [range]);
+
+  // Queue stats (filtered by date range)
   const { data: queueStats, isLoading } = useQuery<Record<string, Record<string, number>>>({
-    queryKey: ['queue-stats'],
-    queryFn: getQueueStats,
+    queryKey: ['queue-stats', rangeParams],
+    queryFn: () => getQueueStats(rangeParams),
     refetchInterval: 5000,
   });
 
-  const { data: jobStats } = useQuery<Record<string, number>>({
-    queryKey: ['job-stats'],
-    queryFn: getJobStats,
-    refetchInterval: 30000,
+  // Job crawl breakdown (filtered by date range)
+  const { data: crawlBreakdown, isLoading: crawlLoading } = useQuery<CrawlBreakdownData>({
+    queryKey: ['job-crawl-breakdown', rangeParams],
+    queryFn: () => getJobCrawlBreakdown(rangeParams),
+    refetchInterval: 15000,
   });
 
   const resetStaleMut = useMutation({
@@ -198,6 +310,11 @@ export function MonitorRunsOverview() {
     { pending: 0, processing: 0, done: 0, failed: 0 }
   );
 
+  function selectQuickRange(label: string, fromFn: () => string) {
+    setActiveQuick(label);
+    setRange({ from: fromFn(), to: new Date().toISOString() });
+  }
+
   return (
     <div className="p-6 space-y-6">
       {/* Page header */}
@@ -208,7 +325,7 @@ export function MonitorRunsOverview() {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Monitor Runs</h1>
-            <p className="text-sm text-gray-500">Live overview of all pipeline queues · auto-updates every 5s</p>
+            <p className="text-sm text-gray-500">Live overview of all pipeline queues</p>
           </div>
         </div>
         <button
@@ -222,20 +339,64 @@ export function MonitorRunsOverview() {
         </button>
       </div>
 
-      {/* Overall summary row */}
-      <div className="grid grid-cols-5 gap-4">
+      {/* Date range selector */}
+      <div className="card p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Range:</span>
+          <div className="flex flex-wrap gap-1">
+            {QUICK_RANGES.map(qr => (
+              <button
+                key={qr.label}
+                onClick={() => selectQuickRange(qr.label, qr.from)}
+                className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors ${
+                  activeQuick === qr.label
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {qr.label}
+              </button>
+            ))}
+          </div>
+          <div className="h-5 w-px bg-gray-200 mx-1" />
+          <div className="flex items-center gap-2 text-xs">
+            <label className="text-gray-500">From</label>
+            <input
+              type="datetime-local"
+              className="border border-gray-200 rounded px-2 py-1 text-xs"
+              value={toLocalInput(range.from)}
+              onChange={e => {
+                setActiveQuick('');
+                setRange(r => ({ ...r, from: fromLocalInput(e.target.value) }));
+              }}
+            />
+            <label className="text-gray-500">To</label>
+            <input
+              type="datetime-local"
+              className="border border-gray-200 rounded px-2 py-1 text-xs"
+              value={toLocalInput(range.to)}
+              onChange={e => {
+                setActiveQuick('');
+                setRange(r => ({ ...r, to: fromLocalInput(e.target.value) }));
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Overall summary row — 4 cards */}
+      <div className="grid grid-cols-4 gap-4">
         {[
-          { label: 'Total Pending',    value: totals.pending,           icon: Clock,       color: 'text-amber-600',  loading: isLoading },
-          { label: 'Processing Now',   value: totals.processing,        icon: Loader2,     color: 'text-blue-600',   loading: isLoading },
-          { label: 'Completed',        value: totals.done,              icon: CheckCircle, color: 'text-green-600',  loading: isLoading },
-          { label: 'Failed',           value: totals.failed,            icon: XCircle,     color: 'text-red-500',    loading: isLoading },
-          { label: 'Live Jobs',        value: jobStats?.live_jobs ?? 0, icon: Briefcase,   color: 'text-[#0e8136]',  loading: !jobStats },
-        ].map(({ label, value, icon: Icon, color, loading }) => (
+          { label: 'Total Pending',  value: totals.pending,    icon: Clock,       color: 'text-amber-600' },
+          { label: 'Processing Now', value: totals.processing, icon: Loader2,     color: 'text-blue-600' },
+          { label: 'Completed',      value: totals.done,       icon: CheckCircle, color: 'text-green-600' },
+          { label: 'Failed',         value: totals.failed,     icon: XCircle,     color: 'text-red-500' },
+        ].map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="card p-4 flex items-center gap-3">
             <Icon className={`w-5 h-5 flex-shrink-0 ${color}`} />
             <div>
               <div className={`text-xl font-bold ${color}`}>
-                {loading ? '…' : value.toLocaleString()}
+                {isLoading ? '...' : value.toLocaleString()}
               </div>
               <div className="text-xs text-gray-500">{label}</div>
             </div>
@@ -254,6 +415,108 @@ export function MonitorRunsOverview() {
             isTriggering={triggerMuts[qt.runType].isPending}
           />
         ))}
+      </div>
+
+      {/* Jobs Crawled section */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-3 px-4 py-3 bg-gray-50 rounded-xl">
+          <Briefcase className="w-5 h-5 text-gray-600" />
+          <h2 className="text-lg font-semibold text-gray-900">Jobs Crawled</h2>
+          <span className="text-xs text-gray-400 ml-2">Extraction results for selected date range</span>
+        </div>
+
+        {crawlLoading || !crawlBreakdown ? (
+          <div className="flex items-center justify-center py-12 text-gray-400">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" />
+            Loading job breakdown...
+          </div>
+        ) : (
+          <>
+            {/* Row 1: 4 stat cards */}
+            <div className="grid grid-cols-4 gap-4">
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Zap className="w-4 h-4 text-blue-600" />
+                  <span className="text-xs text-gray-500">Total Extracted</span>
+                </div>
+                <div className="text-2xl font-bold text-gray-900">
+                  {crawlBreakdown.total_extracted.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileX className="w-4 h-4 text-orange-500" />
+                  <span className="text-xs text-gray-500">Failed (Core Fields)</span>
+                </div>
+                <div className="text-2xl font-bold text-orange-600">
+                  {crawlBreakdown.failed_core_fields.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Ban className="w-4 h-4 text-red-500" />
+                  <span className="text-xs text-gray-500">Failed (Bad Words)</span>
+                </div>
+                <div className="text-2xl font-bold text-red-500">
+                  {crawlBreakdown.failed_bad_words.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Copy className="w-4 h-4 text-purple-500" />
+                  <span className="text-xs text-gray-500">Failed (Duplicates)</span>
+                </div>
+                <div className="text-2xl font-bold text-purple-600">
+                  {crawlBreakdown.failed_duplicates.toLocaleString()}
+                </div>
+              </div>
+            </div>
+
+            {/* Row 2: 4 stat cards */}
+            <div className="grid grid-cols-4 gap-4">
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <CalendarOff className="w-4 h-4 text-gray-500" />
+                  <span className="text-xs text-gray-500">Failed (Expired)</span>
+                </div>
+                <div className="text-2xl font-bold text-gray-600">
+                  {crawlBreakdown.failed_expired.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <ShieldAlert className="w-4 h-4 text-red-600" />
+                  <span className="text-xs text-gray-500">Failed (Scam)</span>
+                </div>
+                <div className="text-2xl font-bold text-red-600">
+                  {crawlBreakdown.failed_scam.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <CheckCircle className="w-4 h-4 text-green-600" />
+                  <span className="text-xs text-gray-500">Live Jobs</span>
+                </div>
+                <div className="text-2xl font-bold text-green-600">
+                  {crawlBreakdown.live_jobs.toLocaleString()}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Activity className="w-4 h-4 text-indigo-600" />
+                  <span className="text-xs text-gray-500">Quality Breakdown</span>
+                </div>
+                <QualityBar breakdown={crawlBreakdown.quality_breakdown} />
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

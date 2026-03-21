@@ -318,6 +318,84 @@ async def list_banned_jobs(
     return {"items": result, "total": total, "page": page, "page_size": page_size}
 
 
+@router.get("/crawl-breakdown")
+async def job_crawl_breakdown(
+    from_dt: Optional[str] = Query(None),
+    to_dt: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Breakdown of job extraction results for the Jobs Crawled section."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import text
+    from zoneinfo import ZoneInfo
+
+    # Default: last 24 hours
+    if not from_dt:
+        f = datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+    else:
+        f = datetime.fromisoformat(from_dt)
+    t = datetime.fromisoformat(to_dt) if to_dt else datetime.now(ZoneInfo("UTC"))
+
+    result = await db.execute(text("""
+        SELECT
+            COUNT(*) AS total_extracted,
+            COUNT(*) FILTER (WHERE
+                (title IS NULL OR title = '') OR
+                (description IS NULL OR length(description) < 20) OR
+                (location_raw IS NULL OR location_raw = '')
+            ) AS failed_core_fields,
+            COUNT(*) FILTER (WHERE (quality_flags->>'bad_words_detected')::boolean IS TRUE) AS failed_bad_words,
+            COUNT(*) FILTER (WHERE NOT is_canonical AND is_active) AS failed_duplicates,
+            COUNT(*) FILTER (WHERE
+                (date_expires IS NOT NULL AND date_expires < CURRENT_DATE) OR
+                (first_seen_at < NOW() - INTERVAL '60 days' AND NOT is_active)
+            ) AS failed_expired,
+            COUNT(*) FILTER (WHERE (quality_flags->>'scam_detected')::boolean IS TRUE) AS failed_scam,
+            COUNT(*) FILTER (WHERE
+                is_active AND is_canonical
+                AND title IS NOT NULL AND description IS NOT NULL AND company_id IS NOT NULL
+                AND (location_city IS NOT NULL OR location_country IS NOT NULL)
+                AND (quality_flags->>'scam_detected')::boolean IS NOT TRUE
+                AND (quality_flags->>'bad_words_detected')::boolean IS NOT TRUE
+                AND (quality_score IS NULL OR quality_score >= 0.20)
+                AND (date_expires IS NULL OR date_expires >= CURRENT_DATE)
+            ) AS live_jobs
+        FROM jobs
+        WHERE created_at BETWEEN :from_dt AND :to_dt
+    """), {"from_dt": f, "to_dt": t})
+    r = result.one()
+
+    # Quality breakdown of live jobs (all time, not filtered)
+    quality_result = await db.execute(text("""
+        SELECT
+            COUNT(*) FILTER (WHERE quality_score >= 0.8) AS quality_a,
+            COUNT(*) FILTER (WHERE quality_score >= 0.6 AND quality_score < 0.8) AS quality_b,
+            COUNT(*) FILTER (WHERE quality_score >= 0.4 AND quality_score < 0.6) AS quality_c,
+            COUNT(*) FILTER (WHERE quality_score < 0.4 OR quality_score IS NULL) AS quality_d,
+            COUNT(*) AS total_live
+        FROM jobs
+        WHERE is_active AND is_canonical
+    """))
+    q = quality_result.one()
+
+    return {
+        "total_extracted": r.total_extracted,
+        "failed_core_fields": r.failed_core_fields,
+        "failed_bad_words": r.failed_bad_words,
+        "failed_duplicates": r.failed_duplicates,
+        "failed_expired": r.failed_expired,
+        "failed_scam": r.failed_scam,
+        "live_jobs": r.live_jobs,
+        "quality_breakdown": {
+            "A_complete": {"count": q.quality_a, "pct": round(100 * q.quality_a / max(q.total_live, 1), 1)},
+            "B_missing_location": {"count": q.quality_b, "pct": round(100 * q.quality_b / max(q.total_live, 1), 1)},
+            "C_fair": {"count": q.quality_c, "pct": round(100 * q.quality_c / max(q.total_live, 1), 1)},
+            "D_poor": {"count": q.quality_d, "pct": round(100 * q.quality_d / max(q.total_live, 1), 1)},
+            "total": q.total_live,
+        }
+    }
+
+
 @router.get("/description-audit")
 async def description_audit(db: AsyncSession = Depends(get_db)):
     """

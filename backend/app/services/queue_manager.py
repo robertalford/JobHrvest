@@ -96,15 +96,34 @@ async def reset_stale_processing(db, stale_after_minutes: int = 120) -> int:
     return count
 
 
-async def get_stats(db) -> dict:
-    """Return queue depths by type and status."""
+async def get_stats(db, from_dt=None, to_dt=None) -> dict:
+    """Return queue depths by type and status, optionally filtered by date range."""
     from sqlalchemy import text
-    result = await db.execute(text("""
-        SELECT queue_type, status, COUNT(*) as cnt
-        FROM run_queue
-        GROUP BY queue_type, status
-        ORDER BY queue_type, status
-    """))
+    if from_dt and to_dt:
+        result = await db.execute(text("""
+            SELECT queue_type, status, COUNT(*) as cnt
+            FROM run_queue
+            WHERE GREATEST(added_at, COALESCE(processing_started_at, added_at), COALESCE(processing_completed_at, added_at))
+                  BETWEEN :from_dt AND :to_dt
+            GROUP BY queue_type, status
+            ORDER BY queue_type, status
+        """), {"from_dt": from_dt, "to_dt": to_dt})
+    elif from_dt:
+        result = await db.execute(text("""
+            SELECT queue_type, status, COUNT(*) as cnt
+            FROM run_queue
+            WHERE GREATEST(added_at, COALESCE(processing_started_at, added_at), COALESCE(processing_completed_at, added_at))
+                  >= :from_dt
+            GROUP BY queue_type, status
+            ORDER BY queue_type, status
+        """), {"from_dt": from_dt})
+    else:
+        result = await db.execute(text("""
+            SELECT queue_type, status, COUNT(*) as cnt
+            FROM run_queue
+            GROUP BY queue_type, status
+            ORDER BY queue_type, status
+        """))
     stats = {}
     for row in result:
         qt = row[0]
