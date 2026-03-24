@@ -7,8 +7,11 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import bcrypt
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.base import get_db
 
 router = APIRouter()
 
@@ -42,17 +45,21 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 
 @router.post("/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
     invalid = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if form_data.username != settings.APP_USERNAME:
-        raise invalid
-    if not settings.APP_PASSWORD_HASH or not bcrypt.checkpw(
-        form_data.password.encode(), settings.APP_PASSWORD_HASH.encode()
-    ):
+    result = await db.execute(
+        text("SELECT password_hash FROM app_users WHERE username = :u"),
+        {"u": form_data.username},
+    )
+    row = result.first()
+    if not row or not bcrypt.checkpw(form_data.password.encode(), row.password_hash.encode()):
         raise invalid
     return Token(access_token=_create_token(form_data.username), token_type="bearer")
 

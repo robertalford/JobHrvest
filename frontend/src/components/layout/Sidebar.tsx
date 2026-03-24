@@ -1,10 +1,12 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Building2, Briefcase, Globe, Activity,
   Upload, HelpCircle, ShieldX, Ban, Globe2, Search, Clock,
   Type, AlertTriangle, Star, Copy, Info, MapPin, Database,
+  LogOut,
 } from 'lucide-react';
 import logoImg from '/logo.png';
+import { clearToken } from '../../lib/auth';
 
 type NavItem = { to: string; icon: React.ElementType; label: string };
 
@@ -34,6 +36,13 @@ function SectionLabel({ label }: { label: string }) {
 }
 
 export function Sidebar() {
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    clearToken();
+    navigate('/login');
+  }
+
   return (
     <aside className="w-56 bg-white border-r border-gray-200 flex flex-col min-h-screen">
       <div className="p-4 border-b border-gray-200">
@@ -83,7 +92,14 @@ export function Sidebar() {
         <NavItem to="/settings" icon={Info} label="System Health" />
       </nav>
 
-      <div className="p-3 border-t border-gray-200">
+      <div className="p-3 border-t border-gray-200 space-y-2">
+        <button
+          onClick={handleLogout}
+          className="flex items-center gap-2 w-full px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+        >
+          <LogOut className="w-4 h-4" />
+          Log out
+        </button>
         <div className="text-xs text-gray-400 text-center">v0.2.0</div>
       </div>
     </aside>
