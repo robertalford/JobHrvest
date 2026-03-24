@@ -271,6 +271,9 @@ export function MonitorRunsOverview() {
     { label: '6h', value: 360 },
     { label: '12h', value: 720 },
     { label: '24h', value: 1440 },
+    { label: '3d', value: 4320 },
+    { label: '7d', value: 10080 },
+    { label: 'All', value: 0 },
   ];
 
   const { data: timelineData } = useQuery({
@@ -281,11 +284,20 @@ export function MonitorRunsOverview() {
 
   const chartData = useMemo(() => {
     if (!timelineData?.data) return [];
-    return timelineData.data.map((d: { minute: string; live: number; total: number }) => ({
-      time: new Date(d.minute).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
-      live: d.live,
-      total: d.total,
-    }));
+    const bucket = timelineData.bucket || 'minute';
+    return timelineData.data.map((d: { minute: string; live: number; total: number }) => {
+      const dt = new Date(d.minute);
+      let time: string;
+      if (bucket === 'day') {
+        time = dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+      } else if (bucket === 'hour') {
+        time = dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+          + ' ' + dt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      } else {
+        time = dt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      }
+      return { time, live: d.live, total: d.total };
+    });
   }, [timelineData]);
 
 
@@ -508,7 +520,9 @@ export function MonitorRunsOverview() {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-green-600" />
-              <span className="text-sm font-medium text-gray-700">Live Jobs Per Minute</span>
+              <span className="text-sm font-medium text-gray-700">
+                Live Jobs Per {timelineData?.bucket === 'day' ? 'Day' : timelineData?.bucket === 'hour' ? 'Hour' : 'Minute'}
+              </span>
             </div>
             <div className="flex gap-1">
               {CHART_PERIODS.map(p => (

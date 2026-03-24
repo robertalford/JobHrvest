@@ -702,26 +702,40 @@ async def export_jobs(
 
 @router.get("/live-timeline")
 async def live_timeline(
-    minutes: int = Query(30, ge=5, le=1440),
+    minutes: int = Query(30, ge=0, le=525600),
     db: AsyncSession = Depends(get_db),
 ):
-    """Per-minute count of jobs that passed quality gate, for the last N minutes."""
+    """Per-minute/hour/day count of jobs that passed quality gate.
+    minutes=0 means all time. Auto-buckets: <=360 per-minute, <=4320 per-hour, else per-day."""
     from sqlalchemy import text
 
-    result = await db.execute(text("""
+    # Pick bucket size based on range
+    if minutes == 0:
+        bucket = "day"
+    elif minutes <= 360:
+        bucket = "minute"
+    elif minutes <= 4320:
+        bucket = "hour"
+    else:
+        bucket = "day"
+
+    where_clause = "WHERE created_at >= NOW() - make_interval(mins => :minutes)" if minutes > 0 else ""
+
+    result = await db.execute(text(f"""
         SELECT
-            date_trunc('minute', created_at) AS minute,
+            date_trunc(:bucket, created_at) AS minute,
             COUNT(*) AS total_created,
             COUNT(*) FILTER (WHERE quality_score > 0) AS live_count
         FROM jobs
-        WHERE created_at >= NOW() - make_interval(mins => :minutes)
+        {where_clause}
         GROUP BY 1
         ORDER BY 1
-    """), {"minutes": minutes})
+    """), {"minutes": minutes, "bucket": bucket})
 
     rows = result.fetchall()
     return {
         "minutes": minutes,
+        "bucket": bucket,
         "data": [
             {
                 "minute": row.minute.isoformat(),
