@@ -34,6 +34,7 @@ const QUICK_RANGES: { label: string; from: () => string }[] = [
   { label: '3d',    from: () => hoursAgo(72) },
   { label: '7d',    from: () => hoursAgo(168) },
   { label: 'Today', from: () => todayStart() },
+  { label: 'All',   from: () => '2000-01-01T00:00:00.000Z' },
 ];
 
 function toLocalInput(iso: string): string {
@@ -260,7 +261,7 @@ function ChartTooltip({ active, payload, label }: any) {
 
 export function MonitorRunsOverview() {
   const qc = useQueryClient();
-  const [chartMinutes, setChartMinutes] = useState(30);
+  const [chartMinutes, setChartMinutes] = useState(0);
 
   const CHART_PERIODS = [
     { label: '5m', value: 5 },
@@ -302,11 +303,9 @@ export function MonitorRunsOverview() {
 
 
   const [range, setRange] = useState<{ from: string; to: string }>(() => {
-    const now = new Date();
-    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    return { from: yesterday.toISOString(), to: now.toISOString() };
+    return { from: '2000-01-01T00:00:00.000Z', to: new Date().toISOString() };
   });
-  const [activeQuick, setActiveQuick] = useState<string>('24h');
+  const [activeQuick, setActiveQuick] = useState<string>('All');
 
   const rangeParams = useMemo(() => ({
     from_dt: range.from,
