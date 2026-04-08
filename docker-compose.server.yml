@@ -175,7 +175,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=8 -Q crawl_sites,crawl_jobs,discovery,default,celery,geocoder,company_config --prefetch-multiplier=1 --hostname=worker1@%h
+    # PAUSED: production crawls disabled, all capacity redirected to ml_test
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4 -Q ml_test --prefetch-multiplier=1 --hostname=worker1@%h
     deploy:
       resources:
         limits:
@@ -206,7 +207,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4 -Q crawl_sites,crawl_jobs,discovery,default,celery,geocoder,company_config --prefetch-multiplier=1 --hostname=worker2@%h
+    # PAUSED: production crawls disabled, all capacity redirected to ml_test
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2 -Q ml_test --prefetch-multiplier=1 --hostname=worker2@%h
     deploy:
       resources:
         limits:
@@ -237,7 +239,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2 -Q ml,ml_test,default --prefetch-multiplier=1 --hostname=worker-ml@%h
+    # PAUSED: production ML tasks disabled, capacity redirected to ml_test
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2 -Q ml_test --prefetch-multiplier=1 --hostname=worker-ml@%h
     deploy:
       resources:
         limits:
