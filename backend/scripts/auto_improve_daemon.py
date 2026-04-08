@@ -286,6 +286,86 @@ def _update_improvement_run(token: str, run_id: str, data: dict):
         log(f"⚠️ Failed to update improvement run {run_id}: {e}")
 
 
+def _build_improvement_description(analysis: dict, model_id: str, model_name: str, next_version: str) -> str:
+    """Build a rich 1-3 sentence description of what the improvement run did.
+
+    Combines analysis data (which sites failed, what gaps existed) with
+    the Codex log (what specific changes were implemented).
+    """
+    # Part 1: What was the problem (from analysis)
+    failures = analysis.get("failures", [])
+    gaps = analysis.get("gaps", [])
+    fail_companies = [f.get("company", "?") for f in failures[:4]]
+    gap_companies = [g.get("company", "?") for g in gaps[:4]]
+    accuracy = analysis.get("accuracy", 0)
+    vol_ratio = analysis.get("volume_ratio", 1.0)
+
+    problem_parts = []
+    if fail_companies:
+        problem_parts.append(f"Targeted {len(failures)} failing site{'s' if len(failures) != 1 else ''} ({', '.join(fail_companies)})")
+    if gap_companies:
+        problem_parts.append(f"{len(gaps)} gap{'s' if len(gaps) != 1 else ''} ({', '.join(gap_companies)})")
+    if vol_ratio < 0.95 and not problem_parts:
+        problem_parts.append(f"volume at {vol_ratio:.0%} of baseline")
+
+    problem_line = ". ".join(problem_parts) + "." if problem_parts else ""
+
+    # Part 2: What was done (from Codex log — extract the "implementing" summary)
+    codex_summary = ""
+    log_file = os.path.join(LOG_DIR, f"{model_id}.log")
+    if os.path.exists(log_file):
+        try:
+            with open(log_file) as f:
+                lines = f.readlines()
+            # Find the best "I'm now implementing..." or "I'm applying..." line
+            implement_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if "🤖" in stripped:
+                    lower = stripped.lower()
+                    # Look for lines that describe what was built/changed
+                    if any(kw in lower for kw in [
+                        "implementing", "i'm applying", "i'm adding",
+                        "applied a focused", "update:", "robust ",
+                        "dedicated ", "improved ", "added ",
+                        "fix set", "patch that", "change set",
+                    ]):
+                        # Extract just the content after the timestamp and emoji
+                        content = stripped
+                        if "🤖" in content:
+                            content = content.split("🤖", 1)[1].strip()
+                        # Remove leading "I've" / "I'm" boilerplate
+                        for prefix in ["I've ", "I'm now ", "I'm applying ", "I'm "]:
+                            if content.startswith(prefix):
+                                content = content[len(prefix):]
+                                break
+                        implement_lines.append(content)
+
+            if implement_lines:
+                # Use the most detailed implementation line (usually the last one before tests)
+                best = max(implement_lines, key=len)
+                # Truncate to ~250 chars
+                if len(best) > 250:
+                    best = best[:247] + "..."
+                codex_summary = best
+        except Exception:
+            pass
+
+    # Part 3: Compose final description
+    parts = []
+    if problem_line:
+        parts.append(problem_line)
+    if codex_summary:
+        parts.append(codex_summary)
+    elif problem_parts:
+        parts.append(f"Codex auto-improved {model_name} → {next_version}.")
+
+    # Add accuracy context
+    parts.append(f"Previous accuracy: {accuracy:.0%}, volume: {vol_ratio:.0%}.")
+
+    return " ".join(parts)
+
+
 def _determine_test_winner(model: dict) -> str | None:
     """Determine winner from the model's latest test run composite scores."""
     tr = model.get("latest_test_run")
@@ -488,15 +568,8 @@ def run_improvement(model: dict, token: str):
     except Exception as e:
         log(f"❌ Test trigger failed: {e}")
 
-    # Build description from analysis
-    desc_parts = []
-    if analysis.get("fail_count"):
-        desc_parts.append(f"{analysis['fail_count']} failures fixed")
-    if analysis.get("gap_count"):
-        desc_parts.append(f"{analysis['gap_count']} gaps addressed")
-    if vol_ratio < 0.95:
-        desc_parts.append(f"volume ratio {vol_ratio:.0%} → improved")
-    description = "; ".join(desc_parts) if desc_parts else f"Auto-improvement from {model_name}"
+    # Build rich description from analysis + Codex log
+    description = _build_improvement_description(analysis, model_id, model_name, next_version)
 
     # Mark improvement run as completed
     if imp_run_id:
