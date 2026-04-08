@@ -84,37 +84,66 @@ def get_models(token: str) -> list:
 
 
 def find_model_needing_improvement(token: str) -> dict | None:
-    """Find the latest model with a completed test that has auto_improve=true and hasn't been processed."""
+    """Find the best model to improve from.
+
+    Strategy: always improve from the BEST model (highest accuracy), not the latest.
+    If the latest model regressed, we rollback to the best and try again.
+    """
     models = get_models(token)
 
+    # Find the model that just completed a test with auto_improve
+    latest_completed = None
     for model in models:
-        # Only process tiered_extractor models (not old site_job_listings)
         if model.get("model_type") != "tiered_extractor":
             continue
         tr = model.get("latest_test_run")
-        if not tr:
-            continue
-        if tr.get("status") != "completed":
+        if not tr or tr.get("status") != "completed":
             continue
         config = tr.get("test_config") or {}
         if not config.get("auto_improve"):
             continue
-
-        # Check if a newer model already exists (meaning this was already processed)
         model_ver = _extract_version(model["name"])
         if model_ver is None:
             continue
-
-        # Check if the next version's extractor file (or skip marker) already exists
         next_file_ver = model_ver + 1
         next_file = os.path.join(PROJECT_DIR, "app", "crawlers", f"tiered_extractor_v{next_file_ver}.py")
         skip_file = next_file + ".skip"
         if os.path.exists(next_file) or os.path.exists(skip_file):
-            continue  # Already processed
+            continue
+        latest_completed = model
+        break
 
-        return model
+    if not latest_completed:
+        return None
 
-    return None
+    # Find the BEST model by composite score (live model should be the best)
+    best_model = None
+    best_score = 0
+    for model in models:
+        if model.get("model_type") != "tiered_extractor":
+            continue
+        tr = model.get("latest_test_run")
+        if not tr or tr.get("status") != "completed":
+            continue
+        rd = tr.get("results_detail") or {}
+        summary = rd.get("summary") or {}
+        ch_score = (summary.get("challenger_composite") or {}).get("composite", 0)
+        if ch_score and ch_score > best_score:
+            best_score = ch_score
+            best_model = model
+
+    # If the latest model regressed below the best, improve from the best instead
+    latest_tr = latest_completed.get("latest_test_run") or {}
+    latest_rd = latest_tr.get("results_detail") or {}
+    latest_summary = latest_rd.get("summary") or {}
+    latest_score = (latest_summary.get("challenger_composite") or {}).get("composite", 0)
+
+    if best_model and best_score > 0 and latest_score < best_score * 0.95:
+        log(f"⚠️ {latest_completed['name']} regressed ({latest_score:.1f} < {best_score:.1f}). "
+            f"Rolling back to {best_model['name']} as improvement base.")
+        return best_model
+
+    return latest_completed
 
 
 STUCK_TEST_TIMEOUT = 3600  # 60 min — tests on 50+ sites need time

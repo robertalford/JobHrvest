@@ -1229,6 +1229,14 @@ async def execute_test_run(
 
     # Finder version mapping: model version → finder file version
     _FINDER_MAP = {
+        91: 91,  # v9.1 linked-card account-label filter + EasyJobs card extractor with finder parity
+        90: 90,  # v9.0 progressive pagination sequencing + title precision recovery with finder parity
+        89: 89,  # v8.9 structured card/table recovery + pagination fill with finder parity
+        88: 88,  # v8.8 ATS row recovery + bounded pagination fill with finder parity
+        87: 87,  # v8.7 same-page anchor preservation + careers-page/workday volume recovery with finder parity
+        86: 86,  # v8.6 structured-title dedupe fix + Jobmonster page2 + module-shell render trigger with finder parity
+        85: 85,  # v8.5 Jobs2Web shell recovery + multi-location/open-state extraction with finder parity
+        84: 84,  # v8.4 ATS row-volume recovery (Jobvite/TalentSoft/Jobs2Web DOM) with finder parity
         83: 83,  # v8.3 super-first fallback arbitration + row/pagination recovery with finder parity
         82: 82,  # v8.2 heading-action recovery + superset arbitration with finder parity
         81: 81,  # v8.1 structured-row multilingual recovery with finder parity
@@ -1294,13 +1302,11 @@ async def execute_test_run(
         ORDER BY random()
         LIMIT :limit
     """)
-    # ── Site selection strategy ──
-    # Auto-improve mode: 20 regression (from prev run) + 20 new (unseen) = 40 sites
-    # Manual mode: use_fixed_set + include_exploration as before
-    use_fixed = body.use_fixed_set
-    include_exploration = body.include_exploration
+    # ── Site selection: ALWAYS use the same fixed test set ──
+    # Consistent comparison requires testing every model on the SAME sites.
+    # No adaptive sizing, no exploration — just the fixed set, deterministically ordered.
+    import random as _rng
 
-    # Load all available fixed test sites
     all_fixed = []
     try:
         fixed_q = sa_text("SELECT url, company_name, known_selectors FROM fixed_test_sites ORDER BY md5(url)")
@@ -1309,108 +1315,18 @@ async def execute_test_run(
     except Exception:
         pass
 
-    regression_pages = []
-    new_pages = []
-
-    if body.auto_improve and all_fixed:
-        # ── Auto-improve: adaptive sample size based on model accuracy ──
-        # Low accuracy  → small sample (fast iteration, plenty of learnings)
-        # High accuracy → large sample (need more sites to find remaining gaps)
-        #
-        # | Accuracy   | Regression | New  | Total | Rationale                          |
-        # |------------|------------|------|-------|------------------------------------|
-        # | < 40%      | 5          | 5    | 10    | Lots to learn, iterate fast        |
-        # | 40-60%     | 8          | 8    | 16    | Making progress, moderate sample   |
-        # | 60-75%     | 12         | 12   | 24    | Getting better, need more signal   |
-        # | 75-85%     | 15         | 15   | 30    | Fine-tuning, bigger sample needed  |
-        # | > 85%      | 20         | 20   | 40    | Near parity, maximize coverage     |
-        import random as _rng
-
-        # Get previous run accuracy to determine sample size
-        prev_run = await db.scalar(
-            select(MLModelTestRun)
-            .where(
-                MLModelTestRun.status == "completed",
-                MLModelTestRun.model_id != model_id,
-            )
-            .order_by(MLModelTestRun.created_at.desc())
-            .limit(1)
-        )
-        prev_accuracy = prev_run.accuracy if prev_run and prev_run.accuracy else 0
-        prev_urls: set[str] = set()
-        if prev_run and prev_run.results_detail:
-            prev_urls = {s["url"] for s in prev_run.results_detail.get("sites", []) if "url" in s}
-
-        # Adaptive half-size (regression count = new count)
-        if prev_accuracy >= 0.85:
-            half = 20
-        elif prev_accuracy >= 0.75:
-            half = 15
-        elif prev_accuracy >= 0.60:
-            half = 12
-        elif prev_accuracy >= 0.40:
-            half = 8
-        else:
-            half = 5
-
-        logger.info("Auto-improve adaptive sizing: prev_accuracy=%.0f%% → %d regression + %d new = %d total",
-                     prev_accuracy * 100, half, half, half * 2)
-
-        if prev_urls:
-            # Regression: pick up to `half` sites from the previous run
-            prev_fixed = [p for p in all_fixed if p[0] in prev_urls]
-            regression_pages = prev_fixed[:half] if len(prev_fixed) <= half else _rng.sample(prev_fixed, half)
-        else:
-            # No previous run — pick random regression set
-            regression_pages = _rng.sample(all_fixed, min(half, len(all_fixed)))
-
-        # New: pick `half` sites NOT in the regression set
-        regression_urls = {p[0] for p in regression_pages}
-        available_new = [p for p in all_fixed if p[0] not in regression_urls]
-        new_pages = _rng.sample(available_new, min(half, len(available_new)))
-
-        logger.info(
-            "Auto-improve site selection: %d regression + %d new = %d total (from %d fixed pool)",
-            len(regression_pages), len(new_pages), len(regression_pages) + len(new_pages), len(all_fixed),
-        )
+    if all_fixed:
+        # Use consistent 50 sites from the fixed pool (deterministic order via md5)
+        pages = all_fixed[:min(sample_size, len(all_fixed))]
     else:
-        # ── Manual mode: original behavior ──
-        if use_fixed:
-            regression_pages = list(all_fixed)
-
-        if include_exploration:
-            try:
-                explore_q = sa_text("""
-                    SELECT su.url, js.name as company_name, sw.selectors as known_selectors
-                    FROM site_url_test_data su
-                    JOIN job_site_test_data js ON js.external_id = su.site_id
-                    JOIN crawler_test_data ct ON ct.job_site_id = su.site_id
-                    JOIN site_wrapper_test_data sw ON sw.crawler_id = ct.external_id
-                    WHERE su.url LIKE 'http%'
-                      AND su.url NOT LIKE 'file://%'
-                      AND js.site_type IN ('employer', 'recruiter')
-                      AND (js.uncrawlable_reason IS NULL OR js.uncrawlable_reason IN ('', 'null'))
-                      AND su.url NOT IN (SELECT url FROM fixed_test_sites)
-                    ORDER BY random()
-                    LIMIT :limit
-                """)
-                explore_result = await db.execute(explore_q, {"limit": min(sample_size, 50)})
-                new_pages = explore_result.fetchall()
-            except Exception:
-                pass
-
-    if not regression_pages and not new_pages:
-        # Fallback to original random query
+        # Fallback: random from test data
         result = await db.execute(pages_q, {"limit": sample_size})
-        regression_pages = result.fetchall()
+        pages = result.fetchall()
 
-    all_pages = list(regression_pages) + list(new_pages)
-    if not all_pages:
+    if not pages:
         raise HTTPException(status_code=400, detail="No test data sites available")
-
-    pages = all_pages
-    fixed_count = len(regression_pages)
-    explore_count = len(new_pages)
+    fixed_count = len(pages)
+    explore_count = 0
 
     challenger_label = model.name or "Challenger"
     champion_label = champion_name or None
@@ -1419,7 +1335,7 @@ async def execute_test_run(
 
     run = MLModelTestRun(
         model_id=model_id,
-        test_name=f"Test x {len(pages)} sites ({fixed_count} fixed + {explore_count} explore)",
+        test_name=f"Test x {len(pages)} fixed sites",
         test_config={
             "sample_size": sample_size,
             "page_count": len(pages),

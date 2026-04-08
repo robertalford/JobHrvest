@@ -532,7 +532,12 @@ def _pick_finder(name: str):
     """Select career page finder class by model name. Dynamic import."""
     import importlib, re
     _FINDER_MAP = {
-        83: 83, 82: 82, 81: 81, 80: 80, 79: 79, 78: 78, 77: 77, 76: 76,
+        91: 91,
+        90: 90,
+        89: 89,
+        88: 88,
+        87: 87,
+        86: 86, 85: 85, 84: 84, 83: 83, 82: 82, 81: 81, 80: 80, 79: 79, 78: 78, 77: 77, 76: 76,
         75: 75, 74: 74, 73: 73, 72: 72, 71: 71, 70: 70, 69: 69,
         68: 68, 67: 67, 66: 66, 65: 65, 64: 64, 63: 63, 62: 62,
         61: 61, 60: 60, 20: 20, 17: 5, 16: 4, 15: 3, 14: 2, 13: 2, 12: 2,
@@ -693,8 +698,26 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
         timeout=20, follow_redirects=True, verify=False,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
     ) as client:
-        # ── Phase A: Baseline ──
+        # ── Phase A: Baseline (with Redis cache for fixed test sites) ──
+        import hashlib, redis as _redis
+        from app.core.config import settings as _settings
+        _r = _redis.Redis.from_url(_settings.CELERY_BROKER_URL)
+        _cache_key = f"baseline_cache:{hashlib.md5(url.encode()).hexdigest()}"
+        _cached = None
         try:
+            _cached_raw = _r.get(_cache_key)
+            if _cached_raw:
+                _cached = _json.loads(_cached_raw)
+        except Exception:
+            pass
+
+        if _cached:
+            # Use cached baseline
+            entry["http_ok"] = _cached.get("http_ok", True)
+            entry["baseline"] = _cached["baseline"]
+            logger.info("Site %d: baseline cache HIT for %s", site_index, company_name)
+        else:
+          try:
             baseline_html = await _execute_baseline_with_steps(url, known, client)
             if len(baseline_html) > 200:
                 entry["http_ok"] = True
@@ -762,7 +785,7 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
                                 continue
                         return None
 
-                    for job in baseline_jobs[:50]:
+                    for job in baseline_jobs[:10]:  # Cap at 10 for speed
                         detail_url = job.get("source_url", "")
                         if not detail_url or detail_url == url:
                             continue
@@ -797,7 +820,16 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
                 entry["baseline"]["fields"] = _field_coverage(baseline_jobs)
                 entry["baseline"]["sample_titles"] = [j["title"][:80] for j in baseline_jobs[:5]]
                 entry["baseline"]["extracted_jobs"] = _truncate_jobs(baseline_jobs)
-        except Exception:
+          except Exception:
+            pass
+
+          # Cache baseline result (24h TTL)
+          try:
+            _r.setex(_cache_key, 86400, _json.dumps({
+                "http_ok": entry["http_ok"],
+                "baseline": entry["baseline"],
+            }, default=str))
+          except Exception:
             pass
 
         # ── Helper: run discovery + extraction for a model ──
@@ -1017,10 +1049,33 @@ async def _aggregate(
             reg_stats = summary.get("regression")
             reg_acc = reg_stats["accuracy"] if reg_stats else summary["accuracy"]
 
+            # Regression gate: challenger must pass all sites champion passed
+            champ_passed_urls = set()
+            challenger_missed = set()
+            if champion_name:
+                for sr in site_results:
+                    champ_data = sr.get("champion") or {}
+                    model_data = sr.get("model") or {}
+                    champ_quality = champ_data.get("jobs_quality", champ_data.get("jobs", 0))
+                    model_quality = model_data.get("jobs_quality", model_data.get("jobs", 0))
+                    baseline_jobs = sr.get("baseline", {}).get("jobs", 0)
+                    # Champion "passed" = got >=90% of baseline
+                    if baseline_jobs > 0 and champ_quality >= baseline_jobs * 0.9:
+                        champ_passed_urls.add(sr["url"])
+                        # Check if challenger also passed this site
+                        if model_quality < baseline_jobs * 0.9:
+                            challenger_missed.add(sr.get("company", sr["url"]))
+
+            regression_ok = len(challenger_missed) == 0
+            if challenger_missed:
+                logger.warning("Regression: challenger missed %d sites champion passed: %s",
+                               len(challenger_missed), ", ".join(list(challenger_missed)[:5]))
+
             should_promote = (
                 ch_scores["composite"] > 0
                 and reg_acc >= 0.60
                 and ch_scores["composite"] > champ_scores["composite"]
+                and regression_ok  # Must not regress on any champion-passing site
             )
 
             if should_promote:
