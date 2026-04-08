@@ -540,10 +540,29 @@ async def get_auto_improve_activity(
     log_age = time.time() - os.path.getmtime(latest)
     log_stale = log_age > 60
 
+    # 4. Check daemon status file (written by host-side daemon every 30s)
+    #    This is the most reliable signal since pgrep can't see host processes from Docker.
+    #    Use file mtime (OS-level, timezone-safe) rather than parsing timestamps.
+    daemon_alive = False
+    status_file = "/storage/auto_improve_status.json"
+    if os.path.exists(status_file):
+        try:
+            status_age = time.time() - os.path.getmtime(status_file)
+            if status_age < 120:  # File modified within 2 minutes = daemon alive
+                import json as _json
+                with open(status_file) as sf:
+                    status = _json.load(sf)
+                daemon_alive = status.get("alive", False)
+        except Exception:
+            pass
+
     # Process check runs inside Docker and can't see host processes,
     # so also treat a fresh (recently written) log as "running"
     log_is_fresh = not log_stale  # modified within last 60s
-    running = (process_alive or log_is_fresh) and not log_says_done
+    # Daemon alive (from status file) takes priority over log_says_done,
+    # because "exited with code" in the log just means a previous Codex run
+    # finished — the daemon itself may still be running and waiting.
+    running = daemon_alive or ((process_alive or log_is_fresh) and not log_says_done)
 
     # Also check supervisor log for recent health check messages
     supervisor_lines = []
