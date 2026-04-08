@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 PROMPT_FILE = "/storage/v10_extraction_prompt.md"
 QUEUE_DIR = "/storage/v10_queue"
-RESULT_TIMEOUT = 90  # seconds to wait for LLM result
+RESULT_TIMEOUT = 150  # seconds to wait for LLM result
 
 
 def _load_prompt() -> str:

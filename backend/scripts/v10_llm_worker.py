@@ -19,8 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 QUEUE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "storage", "v10_queue")
 CODEX_MODEL = os.environ.get("V10_CODEX_MODEL", "gpt-5.3-codex")
-CODEX_TIMEOUT = int(os.environ.get("V10_CODEX_TIMEOUT", "60"))
-MAX_WORKERS = int(os.environ.get("V10_MAX_WORKERS", "8"))
+CODEX_TIMEOUT = int(os.environ.get("V10_CODEX_TIMEOUT", "120"))
+MAX_WORKERS = int(os.environ.get("V10_MAX_WORKERS", "4"))
 POLL_INTERVAL = 0.5  # seconds
 
 
