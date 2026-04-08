@@ -12,6 +12,8 @@ from app.models.lead_import_batch import LeadImportBatch
 from app.models.excluded_site import ExcludedSite
 from app.models.settings import WordFilter, SystemSetting
 from app.models.geo_location import GeoLocation, GeocodeCache
+from app.models.test_data import CrawlerTestData, JobSiteTestData, SiteUrlTestData, SiteWrapperTestData
+from app.models.ml_model import MLModel, MLModelTestRun, MLTestFeedback, CodexImprovementRun
 
 __all__ = [
     "Market",
@@ -30,4 +32,12 @@ __all__ = [
     "SystemSetting",
     "GeoLocation",
     "GeocodeCache",
+    "CrawlerTestData",
+    "JobSiteTestData",
+    "SiteUrlTestData",
+    "SiteWrapperTestData",
+    "MLModel",
+    "MLModelTestRun",
+    "MLTestFeedback",
+    "CodexImprovementRun",
 ]

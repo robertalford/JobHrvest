@@ -196,3 +196,80 @@ export const triggerRetroGeocode = (retry_failed = false) =>
 
 export const getLiveTimeline = (minutes = 30) =>
   api.get('/jobs/live-timeline', { params: { minutes } }).then(r => r.data);
+
+// Queue pause/resume
+export const getQueuePauseState = () =>
+  api.get('/crawl/queue/pause-state').then(r => r.data);
+export const pauseQueue = (queueType: string) =>
+  api.post(`/crawl/queue/pause/${queueType}`).then(r => r.data);
+export const resumeQueue = (queueType: string) =>
+  api.post(`/crawl/queue/resume/${queueType}`).then(r => r.data);
+
+// Test Data
+export const getTestDataStats = () =>
+  api.get('/test-data/stats').then(r => r.data);
+export const getTestDataCrawlers = (page = 1, page_size = 50) =>
+  api.get('/test-data/crawlers', { params: { page, page_size } }).then(r => r.data);
+export const getTestDataJobSites = (page = 1, page_size = 50) =>
+  api.get('/test-data/job-sites', { params: { page, page_size } }).then(r => r.data);
+export const getTestDataSiteUrls = (page = 1, page_size = 50) =>
+  api.get('/test-data/site-urls', { params: { page, page_size } }).then(r => r.data);
+export const getTestDataSiteWrappers = (page = 1, page_size = 50) =>
+  api.get('/test-data/site-wrappers', { params: { page, page_size } }).then(r => r.data);
+export const importTestData = () =>
+  api.post('/test-data/import').then(r => r.data);
+
+// ML Models
+export const getMLModels = (params?: Record<string, unknown>) =>
+  api.get('/ml-models/', { params }).then(r => r.data);
+export const createMLModel = (data: Record<string, unknown>) =>
+  api.post('/ml-models/', data).then(r => r.data);
+export const getMLModel = (id: string) =>
+  api.get(`/ml-models/${id}`).then(r => r.data);
+export const updateMLModel = (id: string, data: Record<string, unknown>) =>
+  api.patch(`/ml-models/${id}`, data).then(r => r.data);
+export const deleteMLModel = (id: string) =>
+  api.delete(`/ml-models/${id}`).then(r => r.data);
+export const getMLModelTestRuns = (modelId: string, page = 1, page_size = 20) =>
+  api.get(`/ml-models/${modelId}/test-runs`, { params: { page, page_size } }).then(r => r.data);
+export const promoteMLModel = (modelId: string) =>
+  api.post(`/ml-models/${modelId}/promote`).then(r => r.data);
+export const triggerAutoImprove = (modelId: string) =>
+  api.post(`/ml-models/${modelId}/auto-improve`).then(r => r.data);
+export const getAutoImproveLog = (modelId: string, offset = 0) =>
+  api.get(`/ml-models/${modelId}/auto-improve/log`, { params: { offset } }).then(r => r.data);
+export const getAutoImproveActivity = (offset = 0) =>
+  api.get('/ml-models/auto-improve/activity', { params: { offset } }).then(r => r.data);
+export const getAutoImproveHealth = () =>
+  api.get('/ml-models/auto-improve/health').then(r => r.data);
+export const stopAutoImprove = () =>
+  api.post('/ml-models/auto-improve/stop').then(r => r.data);
+export const startAutoImprove = () =>
+  api.post('/ml-models/auto-improve/start').then(r => r.data);
+
+// Codex Improvement Runs
+export const getImprovementRuns = (params?: Record<string, unknown>) =>
+  api.get('/ml-models/improvement-runs', { params }).then(r => r.data);
+export const createMLModelTestRun = (modelId: string) =>
+  api.post(`/ml-models/${modelId}/test-runs`).then(r => r.data);
+
+// Feedback
+export const getFeedback = (modelId: string, runId: string, siteUrl?: string) =>
+  api.get(`/ml-models/${modelId}/test-runs/${runId}/feedback`, { params: siteUrl ? { site_url: siteUrl } : {} }).then(r => r.data);
+export const createFeedback = (modelId: string, runId: string, siteUrl: string, comment: string) =>
+  api.post(`/ml-models/${modelId}/test-runs/${runId}/feedback`, { site_url: siteUrl, comment }).then(r => r.data);
+export const updateFeedback = (modelId: string, runId: string, feedbackId: string, comment: string) =>
+  api.patch(`/ml-models/${modelId}/test-runs/${runId}/feedback/${feedbackId}`, { comment }).then(r => r.data);
+export const deleteFeedback = (modelId: string, runId: string, feedbackId: string) =>
+  api.delete(`/ml-models/${modelId}/test-runs/${runId}/feedback/${feedbackId}`).then(r => r.data);
+export const uploadFeedbackScreenshot = (modelId: string, runId: string, feedbackId: string, file: File) => {
+  const fd = new FormData(); fd.append('file', file);
+  return api.post(`/ml-models/${modelId}/test-runs/${runId}/feedback/${feedbackId}/upload`, fd,
+    { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data);
+};
+export const executeMLModelTestRun = (modelId: string, sampleSize = 50, championModelId?: string, autoImprove = false) =>
+  api.post(`/ml-models/${modelId}/test-runs/execute`, {
+    sample_size: sampleSize,
+    champion_model_id: championModelId || undefined,
+    auto_improve: autoImprove,
+  }).then(r => r.data);
