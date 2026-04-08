@@ -1229,6 +1229,7 @@ async def execute_test_run(
 
     # Finder version mapping: model version → finder file version
     _FINDER_MAP = {
+        83: 83,  # v8.3 super-first fallback arbitration + row/pagination recovery with finder parity
         82: 82,  # v8.2 heading-action recovery + superset arbitration with finder parity
         81: 81,  # v8.1 structured-row multilingual recovery with finder parity
         80: 80,  # v8.0 query-table recovery + text hygiene with finder parity
@@ -1437,8 +1438,6 @@ async def execute_test_run(
     await db.refresh(run)
     run_id = run.id
 
-    # _execute() moved to Celery task ml.execute_test_run (ml_tasks.py).
-
     # Serialize pages for Celery (Row objects aren't JSON-serializable)
     pages_serialized = []
     for row in pages:
@@ -1451,18 +1450,16 @@ async def execute_test_run(
         else:
             pages_serialized.append([row[0], row[1], str(sel) if sel else "{}"])
 
+    # Fan out: one Celery task per site, then aggregate (parallel across workers)
     from app.tasks.ml_tasks import execute_model_test
-    execute_model_test.apply_async(
-        kwargs={
-            "run_id": str(run_id),
-            "model_id": str(model_id),
-            "model_name": model_name or "",
-            "champion_name": champion_name,
-            "pages_data": pages_serialized,
-            "fixed_count": fixed_count,
-            "auto_improve": auto_improve,
-        },
-        queue="ml_test",
+    execute_model_test(
+        run_id=str(run_id),
+        model_id=str(model_id),
+        model_name=model_name or "",
+        champion_name=champion_name,
+        pages_data=pages_serialized,
+        fixed_count=fixed_count,
+        auto_improve=auto_improve,
     )
     return _serialize_test_run(run)
 
