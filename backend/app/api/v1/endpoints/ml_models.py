@@ -768,7 +768,7 @@ def _composite_score_standalone(results: list[dict], phase_key: str) -> dict:
     discovered = sum(
         1 for s in results
         if (s.get(phase_key) or {}).get("url_found")
-        and not (s.get(phase_key) or {}).get("error", "").startswith("Could not discover")
+        and not ((s.get(phase_key) or {}).get("error") or "").startswith("Could not discover")
     )
     discovery_rate = discovered / total * 100
 

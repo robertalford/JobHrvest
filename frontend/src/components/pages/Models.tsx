@@ -282,9 +282,9 @@ function AllTabTestSummary({ m }: { m: MLModel }) {
       <div className="flex items-center gap-2 whitespace-nowrap">
         <span className="text-gray-400 w-[70px] flex-shrink-0">{label}:</span>
         {score != null && <span className={`font-medium ${scoreCls(score)}`}>{score.toFixed(1)}</span>}
-        <span className="text-gray-500">{sites}/{col.sites_tested} ({pct}%)</span>
+        <span className="text-gray-500">{sites}/{col.sites_tested} ({pct}%) sites</span>
         <span className="text-gray-500">{jobs} jobs</span>
-        <span className={`${col.quality_score >= 50 ? 'text-green-600' : col.quality_score >= 25 ? 'text-amber-600' : 'text-red-500'}`}>{col.quality_score}%</span>
+        <span className={`${col.quality_score >= 50 ? 'text-green-600' : col.quality_score >= 25 ? 'text-amber-600' : 'text-red-500'}`}>{col.quality_score}% quality</span>
         {isWinner && <span className="text-green-600 font-bold text-[10px]">WINNER</span>}
       </div>
     );
