@@ -739,6 +739,74 @@ DISPLAY_FIELDS = [
 ]
 
 
+def _composite_score_standalone(results: list[dict], phase_key: str) -> dict:
+    """Compute composite score for a model phase. Standalone version for use by Celery tasks."""
+    total = len(results)
+    if total == 0:
+        return {"composite": 0, "discovery": 0, "quality_extraction": 0,
+                "field_completeness": 0, "volume_accuracy": 0}
+
+    discovered = sum(
+        1 for s in results
+        if (s.get(phase_key) or {}).get("url_found")
+        and not (s.get(phase_key) or {}).get("error", "").startswith("Could not discover")
+    )
+    discovery_rate = discovered / total * 100
+
+    quality_extracted = sum(
+        1 for s in results
+        if (s.get(phase_key) or {}).get("jobs_quality",
+           (s.get(phase_key) or {}).get("jobs", 0)) > 0
+    )
+    quality_warnings = sum(
+        1 for s in results
+        if (s.get(phase_key) or {}).get("quality_warning")
+    )
+    quality_extraction_rate = max(0, (quality_extracted - quality_warnings) / max(1, total) * 100)
+
+    total_jobs_quality = sum(
+        (s.get(phase_key) or {}).get("jobs_quality",
+         (s.get(phase_key) or {}).get("jobs", 0))
+        for s in results
+    )
+    total_fields = sum(
+        sum(v for k, v in (s.get(phase_key) or {}).get("fields", {}).items()
+            if not k.startswith("_"))
+        for s in results
+    )
+    field_completeness = total_fields / max(1, total_jobs_quality * 6) * 100
+
+    baseline_total = sum(s.get("baseline", {}).get("jobs", 0) for s in results)
+    model_total = sum(
+        (s.get(phase_key) or {}).get("jobs_quality",
+         (s.get(phase_key) or {}).get("jobs", 0))
+        for s in results
+    )
+    if baseline_total > 0:
+        ratio = model_total / baseline_total
+        if ratio >= 1.0:
+            volume_accuracy = max(0, min(100, 100 - max(0, (ratio - 1.5) * 100)))
+        else:
+            volume_accuracy = max(0, 100 * ratio)
+    else:
+        volume_accuracy = 50 if model_total > 0 else 0
+
+    composite = (
+        0.20 * discovery_rate
+        + 0.30 * quality_extraction_rate
+        + 0.25 * field_completeness
+        + 0.25 * volume_accuracy
+    )
+
+    return {
+        "composite": round(composite, 1),
+        "discovery": round(discovery_rate, 1),
+        "quality_extraction": round(quality_extraction_rate, 1),
+        "field_completeness": round(field_completeness, 1),
+        "volume_accuracy": round(volume_accuracy, 1),
+    }
+
+
 def _truncate_jobs(jobs: list[dict], max_jobs: int = 50) -> list[dict]:
     """Truncate job list for storage — keep all fields but cap description length."""
     result = []
@@ -1350,545 +1418,33 @@ async def execute_test_run(
     await db.refresh(run)
     run_id = run.id
 
-    def _build_summary(site_results: list[dict]) -> dict:
-        from collections import Counter
+    # _execute() moved to Celery task ml.execute_test_run (ml_tasks.py).
 
-        def _phase_stats(results):
-            match_counts = Counter(e["match"] for e in results)
-            tier_counts = Counter(
-                e["model"]["tier_used"] or "none"
-                for e in results if e["model"]["jobs"] > 0
-            )
-            # Only count model_equal_or_better as "passed" — partials are NOT successes
-            passed = sum(1 for e in results if e["match"] in ("model_equal_or_better", "model_only"))
-            sites_with_any_jobs = sum(1 for e in results if e["model"].get("jobs_quality", e["model"]["jobs"]) > 0)
-            return {
-                "total_sites": len(results),
-                "model_extracted": passed,
-                "model_partial": sum(1 for e in results if e["match"] == "partial"),
-                "model_failed": len(results) - sites_with_any_jobs,
-                "accuracy": passed / max(1, len(results)),
-                "match_breakdown": dict(match_counts),
-                "tier_breakdown": dict(tier_counts),
-                "jobs": {
-                    "baseline_total": sum(e["baseline"]["jobs"] for e in results),
-                    "model_total": sum(e["model"]["jobs"] for e in results),
-                    "ratio": round(
-                        sum(e["model"]["jobs"] for e in results)
-                        / max(1, sum(e["baseline"]["jobs"] for e in results)),
-                        2,
-                    ),
-                },
-                "quality": {
-                    "baseline_core_complete": sum(e["baseline"]["fields"].get("_core_complete", 0) for e in results),
-                    "model_core_complete": sum(e["model"]["fields"].get("_core_complete", 0) for e in results),
-                },
-            }
+    # Serialize pages for Celery (Row objects aren't JSON-serializable)
+    pages_serialized = []
+    for row in pages:
+        sel = row[2]
+        if isinstance(sel, str):
+            pages_serialized.append([row[0], row[1], sel])
+        elif isinstance(sel, dict):
+            import json as _json
+            pages_serialized.append([row[0], row[1], _json.dumps(sel)])
+        else:
+            pages_serialized.append([row[0], row[1], str(sel) if sel else "{}"])
 
-        # Split into regression (fixed) and exploration phases
-        regression_results = site_results[:fixed_count]
-        exploration_results = site_results[fixed_count:]
-
-        overall = _phase_stats(site_results)
-        overall["regression"] = _phase_stats(regression_results) if regression_results else None
-        overall["exploration"] = _phase_stats(exploration_results) if exploration_results else None
-        return overall
-
-    async def _execute():
-        from app.db.base import AsyncSessionLocal
-        extractor = extractor_cls()
-        champion_extractor = champion_cls() if champion_cls else None
-        # Pick the right finder for each model version
-        challenger_finder_cls = _pick_finder(model.name or "")
-        champion_finder_cls = _pick_finder(champion_name or "") if champion_name else challenger_finder_cls
-        site_results: list[dict] = []
-        total_pages = len(pages)
-
-        async with httpx.AsyncClient(
-            timeout=20, follow_redirects=True, verify=False,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-        ) as client:
-            for idx, row in enumerate(pages):
-                url, company_name = row[0], row[1]
-                known_raw = row[2]
-
-                # Parse known selectors
-                known = {}
-                if known_raw:
-                    if isinstance(known_raw, str):
-                        try:
-                            import json as _json
-                            known = _json.loads(known_raw)
-                        except Exception:
-                            known = {}
-                    elif isinstance(known_raw, dict):
-                        known = known_raw
-
-                # Extract top-level domain for model input
-                from app.crawlers.career_page_finder import extract_domain
-                domain = extract_domain(url)
-
-                entry = {
-                    "url": url,  # known test URL (for reference)
-                    "domain": domain,
-                    "company": company_name,
-                    "http_ok": False,
-                    "baseline": {
-                        "jobs": 0, "fields": {}, "sample_titles": [],
-                        "url_used": url,
-                        "selectors_used": {
-                            "boundary": (known.get("record_boundary_path") or "")[:60],
-                            "title": (known.get("job_title_path") or "")[:60],
-                        },
-                        "full_wrapper": known,
-                    },
-                    "champion": {
-                        "jobs": 0, "fields": {}, "tier_used": None,
-                        "sample_titles": [], "error": None,
-                        "url_found": None, "discovery_method": None,
-                    } if champion_extractor else None,
-                    "model": {
-                        "jobs": 0, "fields": {}, "tier_used": None,
-                        "sample_titles": [], "error": None,
-                        "url_found": None, "discovery_method": None,
-                    },
-                    "match": None,
-                }
-
-                # ── Phase A: Baseline (follows crawl steps from test data) ──
-                try:
-                    baseline_html = await _execute_baseline_with_steps(url, known, client)
-                    if len(baseline_html) > 200:
-                        entry["http_ok"] = True
-                        baseline_jobs = JobExtractor._static_extract_wrapper(baseline_html, url, known)
-
-                        # Follow pagination using next_page_path from wrapper
-                        next_page_sel = known.get("next_page_path", "")
-                        if next_page_sel and next_page_sel not in ("null", "", "//no-next-page", "#none", "/nonextpagelink"):
-                            try:
-                                pages_followed = 0
-                                seen = {url}
-                                current_html = baseline_html
-                                current_url = url
-                                while pages_followed < 5:
-                                    nroot = _parse_html_safe(current_html)
-                                    if nroot is None:
-                                        break
-                                    next_url = _find_next_url(nroot, current_url, next_page_sel)
-                                    if not next_url or next_url in seen:
-                                        break
-                                    seen.add(next_url)
-                                    try:
-                                        nr = await client.get(next_url)
-                                        if nr.status_code != 200 or len(nr.text) < 200:
-                                            break
-                                        current_html = nr.text
-                                        current_url = next_url
-                                        more_jobs = JobExtractor._static_extract_wrapper(current_html, current_url, known)
-                                        existing = {j["source_url"] for j in baseline_jobs}
-                                        new = [j for j in more_jobs if j["source_url"] not in existing]
-                                        if not new:
-                                            break
-                                        baseline_jobs.extend(new)
-                                        pages_followed += 1
-                                    except Exception:
-                                        break
-                            except Exception:
-                                pass
-
-                        # ── Step 2: Detail page enrichment ──
-                        # Follow detail page links to fill missing location/description
-                        # using the wrapper's detail-page selectors (like production Jobstream)
-                        _parse = JobExtractor._parse_selector_paths
-                        detail_desc_sels = _parse(known.get("details_page_description_paths", []))
-                        detail_loc_sels = _parse(known.get("details_page_location_paths", []))
-                        detail_salary_sel = known.get("details_page_salary_path", "")
-                        detail_type_sels = _parse(known.get("details_page_job_type_paths", []))
-                        has_detail_sels = bool(detail_desc_sels or detail_loc_sels)
-
-                        if has_detail_sels and baseline_jobs:
-                            from lxml import etree as _etree
-
-                            def _try_detail_selectors(detail_html, detail_url, sel_list):
-                                try:
-                                    parser = _etree.HTMLParser(encoding="utf-8")
-                                    tree = _etree.fromstring(detail_html.encode("utf-8", errors="replace"), parser)
-                                except Exception:
-                                    return None
-                                for sel in sel_list:
-                                    if not sel or sel in ("null", ""):
-                                        continue
-                                    try:
-                                        is_xp = sel.startswith("//") or sel.startswith(".//") or sel.startswith("(")
-                                        els = tree.xpath(sel) if is_xp else tree.cssselect(sel)
-                                        if els:
-                                            txt = els[0].text_content().strip() if hasattr(els[0], 'text_content') else _etree.tostring(els[0], method="text", encoding="unicode").strip()
-                                            if txt and len(txt) > 1:
-                                                return txt
-                                    except Exception:
-                                        continue
-                                return None
-
-                            enriched = 0
-                            for job in baseline_jobs[:50]:  # Enrich up to 50 jobs
-                                detail_url = job.get("source_url", "")
-                                if not detail_url or detail_url == url:
-                                    continue
-                                needs_loc = not job.get("location_raw")
-                                needs_desc = not job.get("description") or len(job.get("description", "")) < 50
-                                if not needs_loc and not needs_desc:
-                                    continue
-                                try:
-                                    dr = await client.get(detail_url, timeout=8)
-                                    if dr.status_code != 200 or len(dr.text) < 200:
-                                        continue
-                                    if needs_desc and detail_desc_sels:
-                                        desc = _try_detail_selectors(dr.text, detail_url, detail_desc_sels)
-                                        if desc and len(desc) > 50:
-                                            job["description"] = desc[:5000]
-                                    if needs_loc and detail_loc_sels:
-                                        loc = _try_detail_selectors(dr.text, detail_url, detail_loc_sels)
-                                        if loc and len(loc) > 1 and len(loc) < 200:
-                                            job["location_raw"] = loc
-                                    if detail_salary_sel and not job.get("salary_raw"):
-                                        sal = _try_detail_selectors(dr.text, detail_url, _parse(detail_salary_sel))
-                                        if sal:
-                                            job["salary_raw"] = sal
-                                    if detail_type_sels and not job.get("employment_type"):
-                                        jtype = _try_detail_selectors(dr.text, detail_url, detail_type_sels)
-                                        if jtype:
-                                            job["employment_type"] = jtype
-                                    enriched += 1
-                                except Exception:
-                                    continue
-
-                        entry["baseline"]["jobs"] = len(baseline_jobs)
-                        entry["baseline"]["fields"] = _field_coverage(baseline_jobs)
-                        entry["baseline"]["sample_titles"] = [j["title"][:80] for j in baseline_jobs[:5]]
-                        entry["baseline"]["extracted_jobs"] = _truncate_jobs(baseline_jobs)
-                except Exception:
-                    pass
-
-                # ── Helper: run discovery + extraction for a model ──
-                async def _run_model_phase(ext, finder_cls, phase_dict):
-                    finder = finder_cls(timeout=6)
-                    # Pass the known test URL as a discovery hint
-                    if hasattr(finder, 'set_hint'):
-                        finder.set_hint(url)
-                    disc = {"url": None, "method": "not_run", "html": None}
-                    try:
-                        disc = await finder.find(domain, company_name)
-                    except Exception as e:
-                        disc = {"url": None, "method": f"error:{str(e)[:40]}", "html": None}
-
-                    f_url = disc["url"]
-                    f_html = disc["html"]
-                    phase_dict["url_found"] = f_url
-                    phase_dict["discovery_method"] = disc["method"]
-
-                    if not f_url:
-                        phase_dict["error"] = "Could not discover careers page"
-                        return
-                    if not f_html or len(f_html) < 200:
-                        # Try Playwright as last resort for empty/short pages
-                        try:
-                            from app.crawlers.career_page_finder_v2 import CareerPageFinderV2
-                            rendered = await CareerPageFinderV2._try_playwright(f_url)
-                            if rendered and len(rendered) > 200:
-                                f_html = rendered
-                                phase_dict["discovery_method"] = (phase_dict.get("discovery_method") or "") + "+playwright"
-                        except Exception:
-                            pass
-                    if not f_html or len(f_html) < 200:
-                        phase_dict["error"] = f"Page too short ({len(f_html or '')} bytes), even after Playwright"
-                        return
-
-                    try:
-                        class _P:
-                            def __init__(s): s.url = f_url; s.id = None
-                        class _C:
-                            def __init__(s): s.ats_platform = None; s.name = company_name
-                        jobs = await ext.extract(_P(), _C(), f_html)
-                        phase_dict["jobs"] = len(jobs)
-                        phase_dict["fields"] = _field_coverage(jobs)
-                        phase_dict["sample_titles"] = [j["title"][:80] for j in jobs[:5]]
-                        phase_dict["extracted_jobs"] = _truncate_jobs(jobs)
-                        if jobs:
-                            phase_dict["tier_used"] = jobs[0].get("extraction_method", "unknown")
-                    except Exception as e:
-                        phase_dict["error"] = str(e)[:150]
-
-                # ── Phase B: Champion (with 60s timeout per phase) ──
-                if champion_extractor and entry["champion"] is not None:
-                    try:
-                        await asyncio.wait_for(
-                            _run_model_phase(champion_extractor, champion_finder_cls, entry["champion"]),
-                            timeout=60,
-                        )
-                    except asyncio.TimeoutError:
-                        entry["champion"]["error"] = "Phase timeout (60s)"
-
-                    # Quality check champion — use complete jobs count
-                    champ_fields = entry["champion"].get("fields", {})
-                    champ_complete = champ_fields.get("_core_complete", 0)
-                    champ_raw = entry["champion"].get("jobs", 0)
-                    champ_extracted = entry["champion"].get("extracted_jobs", [])
-                    champ_real = champ_raw
-                    if champ_extracted:
-                        champ_real = _count_real_jobs(champ_extracted)
-                        if champ_real < len(champ_extracted):
-                            entry["champion"]["quality_warning"] = f"Only {champ_real}/{len(champ_extracted)} titles look like real jobs"
-                            entry["champion"]["real_jobs"] = champ_real
-                    entry["champion"]["jobs_quality"] = min(champ_real, champ_complete) if champ_complete > 0 else champ_real
-                    entry["champion"]["jobs_complete"] = champ_complete
-
-                # ── Phase C: Challenger (with 60s timeout) ──
-                try:
-                    await asyncio.wait_for(
-                        _run_model_phase(extractor, challenger_finder_cls, entry["model"]),
-                        timeout=60,
-                    )
-                except asyncio.TimeoutError:
-                    entry["model"]["error"] = "Phase timeout (60s)"
-
-                # Quality scoring: use COMPLETE jobs (core fields populated) for comparison.
-                # Finding 50 titles without locations/descriptions is NOT the same as 50 real jobs.
-                model_fields = entry["model"].get("fields", {})
-                model_complete = model_fields.get("_core_complete", 0)  # jobs with title + url + location
-                model_raw = entry["model"].get("jobs", 0)
-
-                # Also check for fake titles
-                model_extracted = entry["model"].get("extracted_jobs", [])
-                real_title_count = model_raw
-                if model_extracted:
-                    real_title_count = _count_real_jobs(model_extracted)
-                    if real_title_count < len(model_extracted):
-                        entry["model"]["quality_warning"] = f"Only {real_title_count}/{len(model_extracted)} titles look like real jobs"
-                        entry["model"]["real_jobs"] = real_title_count
-
-                # Use complete jobs (core fields) for scoring.
-                # If field coverage was computed (fields dict exists), trust _core_complete even if 0.
-                # Only fall back to raw count if fields dict is entirely missing (legacy data).
-                has_model_fields = bool(model_fields)
-                mj_for_match = model_complete if has_model_fields else real_title_count
-                entry["model"]["jobs_quality"] = mj_for_match
-                entry["model"]["jobs_complete"] = model_complete
-
-                # Same for baseline
-                baseline_fields = entry["baseline"].get("fields", {})
-                has_baseline_fields = bool(baseline_fields)
-                baseline_complete = baseline_fields.get("_core_complete", 0)
-                bj = baseline_complete if has_baseline_fields else entry["baseline"]["jobs"]
-                mj = mj_for_match
-                if bj == 0 and mj == 0:
-                    entry["match"] = "both_failed"
-                elif mj == 0:
-                    entry["match"] = "model_failed"
-                elif bj == 0:
-                    entry["match"] = "model_only"
-                elif mj >= bj * 0.9:
-                    # Model captures >=90% of baseline jobs — genuine match
-                    entry["match"] = "model_equal_or_better"
-                elif mj >= bj * 0.5:
-                    entry["match"] = "partial"
-                else:
-                    entry["match"] = "model_worse"
-
-                site_results.append(entry)
-                await _flush_progress(site_results, idx + 1, total_pages)
-
-        # Final flush as completed — compute scores and save atomically
-        async with AsyncSessionLocal() as bg_db:
-            bg_run = await bg_db.get(MLModelTestRun, run_id)
-            summary = _build_summary(site_results)
-            passed = summary["model_extracted"]
-            bg_run.tests_passed = passed
-            bg_run.tests_failed = summary["model_failed"]
-            bg_run.accuracy = summary["accuracy"]
-            bg_run.status = "completed"
-            bg_run.completed_at = datetime.now(timezone.utc)
-
-            bg_model = await bg_db.get(MLModel, model_id)
-            if bg_model:
-                bg_model.status = "tested"
-
-                # ── Composite scoring for promotion decision ──
-                # 4-axis evaluation: discovery, quality extraction, field completeness, volume accuracy
-                # Each axis is 0-100, weighted to produce a composite 0-100 score.
-                #
-                # Axis 1: Discovery rate (20%) — % of sites where a careers page was found
-                # Axis 2: Quality extraction rate (30%) — % of discovered sites with real jobs (no Type 1)
-                # Axis 3: Field completeness (25%) — avg core field coverage per job
-                # Axis 4: Volume accuracy (25%) — how close to baseline job count (no Type 2)
-
-                def _composite_score(results: list[dict], phase_key: str) -> dict:
-                    """Compute composite score for a model phase ('model' or 'champion')."""
-                    total = len(results)
-                    if total == 0:
-                        return {"composite": 0, "discovery": 0, "quality_extraction": 0,
-                                "field_completeness": 0, "volume_accuracy": 0}
-
-                    # Axis 1: Discovery — sites where URL was found (not "Could not discover")
-                    discovered = sum(
-                        1 for s in results
-                        if (s.get(phase_key) or {}).get("url_found")
-                        and not (s.get(phase_key) or {}).get("error", "").startswith("Could not discover")
-                    )
-                    discovery_rate = discovered / total * 100
-
-                    # Axis 2: Quality extraction — sites with real jobs (quality-adjusted > 0)
-                    quality_extracted = sum(
-                        1 for s in results
-                        if (s.get(phase_key) or {}).get("jobs_quality",
-                           (s.get(phase_key) or {}).get("jobs", 0)) > 0
-                    )
-                    # Penalise quality warnings (Type 1 errors)
-                    quality_warnings = sum(
-                        1 for s in results
-                        if (s.get(phase_key) or {}).get("quality_warning")
-                    )
-                    quality_extraction_rate = (quality_extracted - quality_warnings) / max(1, total) * 100
-                    quality_extraction_rate = max(0, quality_extraction_rate)
-
-                    # Axis 3: Field completeness — avg fields populated per job / 6 core fields
-                    total_jobs_quality = sum(
-                        (s.get(phase_key) or {}).get("jobs_quality",
-                         (s.get(phase_key) or {}).get("jobs", 0))
-                        for s in results
-                    )
-                    total_fields = sum(
-                        sum(v for k, v in (s.get(phase_key) or {}).get("fields", {}).items()
-                            if not k.startswith("_"))
-                        for s in results
-                    )
-                    field_completeness = total_fields / max(1, total_jobs_quality * 6) * 100
-
-                    # Axis 4: Volume accuracy — how close model job count is to baseline
-                    # Score = 100 when ratio is 1.0, decreasing as ratio deviates
-                    baseline_total = sum(s.get("baseline", {}).get("jobs", 0) for s in results)
-                    model_total = sum(
-                        (s.get(phase_key) or {}).get("jobs_quality",
-                         (s.get(phase_key) or {}).get("jobs", 0))
-                        for s in results
-                    )
-                    if baseline_total > 0:
-                        ratio = model_total / baseline_total
-                        if ratio >= 1.0:
-                            # Over-extraction: only penalize if wildly over (>1.5x), gentle curve
-                            volume_accuracy = max(0, min(100, 100 - max(0, (ratio - 1.5) * 100)))
-                        else:
-                            # Under-extraction: penalize proportionally
-                            volume_accuracy = max(0, 100 * ratio)
-                    else:
-                        # No baseline to compare — give partial credit if model found jobs
-                        volume_accuracy = 50 if model_total > 0 else 0
-
-                    # Weighted composite
-                    composite = (
-                        0.20 * discovery_rate
-                        + 0.30 * quality_extraction_rate
-                        + 0.25 * field_completeness
-                        + 0.25 * volume_accuracy
-                    )
-
-                    return {
-                        "composite": round(composite, 1),
-                        "discovery": round(discovery_rate, 1),
-                        "quality_extraction": round(quality_extraction_rate, 1),
-                        "field_completeness": round(field_completeness, 1),
-                        "volume_accuracy": round(volume_accuracy, 1),
-                    }
-
-                challenger_scores = _composite_score(site_results, "model")
-                champion_scores = _composite_score(site_results, "champion") if champion_name else {
-                    "composite": 0, "discovery": 0, "quality_extraction": 0,
-                    "field_completeness": 0, "volume_accuracy": 0,
-                }
-
-                # Store scores in summary for UI display
-                summary["challenger_composite"] = challenger_scores
-                summary["champion_composite"] = champion_scores
-
-                # Regression gate — must maintain ≥60% on fixed regression suite
-                reg_stats = summary.get("regression")
-                challenger_reg_acc = reg_stats["accuracy"] if reg_stats else summary["accuracy"]
-
-                # Promote if: composite score beats champion AND regression gate passes
-                should_promote = (
-                    challenger_scores["composite"] > 0
-                    and challenger_reg_acc >= 0.60
-                    and challenger_scores["composite"] > champion_scores["composite"]
-                )
-
-                if should_promote:
-                    # Demote current live models of same type
-                    old_live = list(await bg_db.scalars(
-                        select(MLModel).where(
-                            MLModel.model_type == bg_model.model_type,
-                            MLModel.status == "live",
-                        )
-                    ))
-                    for old in old_live:
-                        old.status = "tested"
-                    bg_model.status = "live"
-                    logger.info(
-                        "Auto-promoted %s to live (composite %.1f > %.1f for %s) "
-                        "[disc=%.0f%% qual=%.0f%% fields=%.0f%% vol=%.0f%%]",
-                        bg_model.name, challenger_scores["composite"],
-                        champion_scores["composite"], champion_name,
-                        challenger_scores["discovery"], challenger_scores["quality_extraction"],
-                        challenger_scores["field_completeness"], challenger_scores["volume_accuracy"],
-                    )
-                else:
-                    logger.info(
-                        "Did NOT promote %s (composite %.1f vs champion %.1f, reg_acc=%.2f) "
-                        "[disc=%.0f%% qual=%.0f%% fields=%.0f%% vol=%.0f%%]",
-                        bg_model.name, challenger_scores["composite"],
-                        champion_scores["composite"], challenger_reg_acc,
-                        challenger_scores["discovery"], challenger_scores["quality_extraction"],
-                        challenger_scores["field_completeness"], challenger_scores["volume_accuracy"],
-                    )
-
-                # Save everything atomically — results, scores, model status, promotion
-                bg_run.results_detail = {"sites": site_results, "summary": summary}
-                await bg_db.commit()
-
-                # Auto-improve: write trigger file for host watcher
-                # Read from DB test_config (not closure variable) to survive API restarts
-                _should_auto_improve = (bg_run.test_config or {}).get("auto_improve", False) if bg_run else auto_improve
-                if _should_auto_improve:
-                    import os as _os
-                    trigger_dir = "/storage/auto_improve_triggers"
-                    _os.makedirs(trigger_dir, exist_ok=True)
-                    import json as _json
-                    with open(_os.path.join(trigger_dir, f"{model_id}.trigger"), "w") as _tf:
-                        _json.dump({
-                            "model_id": str(model_id),
-                            "model_name": bg_model.name if bg_model else str(model_id),
-                            "triggered_at": datetime.now(timezone.utc).isoformat(),
-                            "auto_improve": True,
-                        }, _tf)
-                    logger.info("Auto-improve trigger written for %s", bg_model.name if bg_model else model_id)
-
-    async def _flush_progress(site_results: list[dict], done: int, total: int):
-        """Write intermediate results to DB so the frontend can poll progress."""
-        from app.db.base import AsyncSessionLocal
-        async with AsyncSessionLocal() as flush_db:
-            flush_run = await flush_db.get(MLModelTestRun, run_id)
-            if not flush_run:
-                return
-            summary = _build_summary(site_results)
-            flush_run.tests_passed = summary["model_extracted"]
-            flush_run.tests_failed = summary["model_failed"]
-            flush_run.accuracy = summary["accuracy"]
-            flush_run.results_detail = {
-                "sites": site_results,
-                "summary": summary,
-                "progress": {"done": done, "total": total},
-            }
-            await flush_db.commit()
-
-    asyncio.create_task(_execute())
+    from app.tasks.ml_tasks import execute_model_test
+    execute_model_test.apply_async(
+        kwargs={
+            "run_id": str(run_id),
+            "model_id": str(model_id),
+            "model_name": model_name or "",
+            "champion_name": champion_name,
+            "pages_data": pages_serialized,
+            "fixed_count": fixed_count,
+            "auto_improve": auto_improve,
+        },
+        queue="ml_test",
+    )
     return _serialize_test_run(run)
 
 
