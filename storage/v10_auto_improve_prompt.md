@@ -1,49 +1,62 @@
-# V10 Auto-Improve: Prompt Engineering for LLM-Based Extraction
+# V10 Auto-Improve: Full Autonomy LLM Extraction System
 
-You are improving the **extraction prompt** used by the v10 LLM-based job extractor. The extractor sends page HTML + this prompt to an LLM, which returns structured job data as JSON.
+You are improving the v10 LLM-based job extraction system. You have **full autonomy** — you can modify any part of the system to achieve the goal.
 
-## Your mission
+## Goal
 
-Improve the extraction prompt at `storage/v10_extraction_prompt.md` to increase job extraction accuracy. You are NOT modifying code — you are engineering a better prompt.
+Increase the percentage of test sites where v10 successfully extracts jobs matching the Jobstream baseline. Currently the system works end-to-end but has low accuracy — your job is to make it dramatically better.
 
-## How the system works
+## System Architecture
 
-1. The test system provides a company's career page URL and its HTML
-2. The HTML (cleaned, truncated) is appended to the extraction prompt
-3. An LLM reads the prompt + HTML and returns a JSON object with jobs + wrapper
-4. The extracted jobs are compared against a known-good baseline (Jobstream wrappers)
+The v10 extraction pipeline:
 
-## What makes a good extraction prompt
+1. **Career Page Finder** (working well at ~100% discovery) finds the careers page URL and fetches HTML
+2. **Extractor** (`backend/app/crawlers/tiered_extractor_v100.py`) processes the HTML:
+   - Cleans/truncates HTML
+   - Writes a prompt + HTML to `/storage/v10_queue/{id}.prompt`
+   - Waits for result at `/storage/v10_queue/{id}.result`
+3. **LLM Worker** (`backend/scripts/v10_llm_worker.py`) runs on the host:
+   - Watches `/storage/v10_queue/` for `.prompt` files
+   - Runs `codex exec` with each prompt
+   - Codex writes JSON result to an output file
+   - Worker reads the result and writes it as `.result`
+4. **Extraction Prompt** (`storage/v10_extraction_prompt.md`) — the core prompt template
 
-- **Precise output format**: The LLM must return valid JSON. Any extra text = parse failure = 0 jobs.
-- **Comprehensive extraction**: Must find ALL jobs, not just the first few. Count matters.
-- **Structural awareness**: Should handle various page layouts (tables, cards, lists, accordions).
-- **ATS detection**: Many sites use standard ATS platforms (Lever, Greenhouse, Workday, etc.) with predictable HTML patterns.
-- **Anti-noise**: Must distinguish real jobs from navigation, blog posts, team pages.
-- **Detail extraction**: Location, salary, employment type should be extracted when present.
-- **URL handling**: Relative URLs must be made absolute using the page URL.
+## What You Can Modify
 
-## Improvement process
+You have **full autonomy** to modify anything:
 
-1. Review the test results below — especially failures and gaps
-2. Read the current prompt at `storage/v10_extraction_prompt.md`
-3. Analyze WHY the LLM failed on specific sites (read their context HTML files)
-4. Identify patterns: Are failures due to prompt ambiguity? Missing instructions? Wrong output format?
-5. Edit `storage/v10_extraction_prompt.md` with targeted improvements
-6. DO NOT change any Python code — only the prompt file
+### High-impact targets:
+- **`storage/v10_extraction_prompt.md`** — the extraction prompt. This is the most direct lever. Make it more specific, add examples, handle edge cases.
+- **`backend/app/crawlers/tiered_extractor_v100.py`** — the extractor code. Add pre-processing (detect ATS patterns, extract JSON-LD, parse embedded API data), improve HTML cleaning, add post-processing validation.
+- **`backend/scripts/v10_llm_worker.py`** — the LLM worker. Change the Codex prompt structure, add multi-step extraction (first analyse, then extract), change how output is captured.
 
-## Common failure patterns to address
+### Structural changes you can make:
+- Add heuristic pre-extraction that handles known ATS patterns (Lever, Greenhouse, Workday) before falling back to LLM
+- Add a structured data detector that finds JSON-LD, embedded JSON, or API endpoints in the HTML
+- Create helper scripts that the LLM worker can call
+- Change the prompt to be multi-step: first "what type of page is this?", then "extract jobs using X strategy"
+- Add HTML pre-processing to strip noise and highlight job-relevant content
+- Create a site classification system (ATS type detection → specialised extraction)
 
-- **JSON parse failures**: LLM adds markdown formatting or explanation around the JSON
-- **Missing jobs**: LLM only extracts a few visible jobs, misses pagination or hidden listings
-- **False positives**: LLM extracts navigation items or team profiles as jobs
-- **Missing fields**: LLM doesn't extract location/salary even when they're in the HTML
-- **Relative URLs**: LLM returns relative paths instead of absolute URLs
-- **ATS blindness**: LLM doesn't recognize standard ATS patterns (JSON-LD, embedded JSON data)
+### What NOT to do:
+- Don't use Playwright, Docker, curl, or API calls (sandbox restrictions)
+- Don't break the queue interface (`.prompt` → `.result` flow)
+- Don't modify files outside the v10 system (no changes to v8.x extractors)
 
-## Sandbox rules
+## How the Test System Works
 
-- ONLY modify `storage/v10_extraction_prompt.md`
-- Do NOT modify any `.py` files
-- Do NOT run Playwright, Docker, or API calls
-- You CAN read context HTML files to understand what the LLM sees
+- 50 fixed test sites are tested (same sites every run, deterministic order)
+- For each site: baseline (Jobstream known-good selectors) vs v10 (your LLM system)
+- A site "passes" if v10 extracts ≥90% of baseline's jobs (by count, quality-adjusted)
+- Composite score weights: 20% discovery, 30% quality extraction, 25% field completeness, 25% volume accuracy
+
+## Self-Review Process
+
+BEFORE making changes, review:
+1. **Your previous run's log** (provided below) — what did you try? What worked? What failed?
+2. **The failure context HTML** — read the actual HTML files to understand page structures
+3. **The current extraction prompt** — identify what's missing or misleading
+4. **Pattern analysis** — group failures by type (ATS platform, page structure, error category)
+
+Then make **targeted, high-impact changes** that address the largest failure categories first.
