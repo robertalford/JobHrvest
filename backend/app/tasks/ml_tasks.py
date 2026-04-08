@@ -532,6 +532,7 @@ def _pick_finder(name: str):
     """Select career page finder class by model name. Dynamic import."""
     import importlib, re
     _FINDER_MAP = {
+        100: 82,  # v10.0 — LLM extractor, uses v82 finder (best discovery)
         91: 91,
         90: 90,
         89: 89,

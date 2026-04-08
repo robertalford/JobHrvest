@@ -1229,6 +1229,7 @@ async def execute_test_run(
 
     # Finder version mapping: model version → finder file version
     _FINDER_MAP = {
+        100: 82,  # v10.0 — LLM extractor, uses v82 finder (best discovery)
         91: 91,  # v9.1 linked-card account-label filter + EasyJobs card extractor with finder parity
         90: 90,  # v9.0 progressive pagination sequencing + title precision recovery with finder parity
         89: 89,  # v8.9 structured card/table recovery + pagination fill with finder parity
