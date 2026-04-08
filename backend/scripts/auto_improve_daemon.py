@@ -121,15 +121,16 @@ STUCK_TEST_TIMEOUT = 3600  # 60 min — tests on 50+ sites need time
 
 
 def _backfill_composites(test_run_id: str):
-    """Compute composite scores for a test run that was force-completed via SQL.
+    """Compute composite scores AND run promotion logic for a force-completed test run.
 
     Runs inside the API container where SQLAlchemy and the scoring logic live.
     """
     script = f"""
 import asyncio, json
+from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
 from app.db.base import AsyncSessionLocal
-from app.models.ml_model import MLModelTestRun
+from app.models.ml_model import MLModel, MLModelTestRun
 
 async def score():
     async with AsyncSessionLocal() as db:
@@ -137,7 +138,7 @@ async def score():
         if not run or not run.results_detail: return
         sites = run.results_detail.get('sites', [])
         summary = run.results_detail.get('summary', {{}})
-        if not sites or summary.get('challenger_composite'): return
+        if not sites: return
         def _s(r, pk):
             t=len(r)
             if t==0: return {{'composite':0,'discovery':0,'quality_extraction':0,'field_completeness':0,'volume_accuracy':0}}
@@ -153,11 +154,52 @@ async def score():
             ratio=mt/bt if bt>0 else 0
             va=(max(0,min(100,100-max(0,(ratio-1.5)*100))) if ratio>=1.0 else max(0,100*ratio)) if bt>0 else (50 if mt>0 else 0)
             return {{'composite':round(.2*d+.3*q+.25*fc+.25*va,1),'discovery':round(d,1),'quality_extraction':round(q,1),'field_completeness':round(fc,1),'volume_accuracy':round(va,1)}}
-        summary['challenger_composite'] = _s(sites, 'model')
-        summary['champion_composite'] = _s(sites, 'champion')
-        flag_modified(run, 'results_detail')
+
+        # Compute scores if not already done
+        if not summary.get('challenger_composite'):
+            summary['challenger_composite'] = _s(sites, 'model')
+            summary['champion_composite'] = _s(sites, 'champion')
+            flag_modified(run, 'results_detail')
+
+        ch_score = summary['challenger_composite']['composite']
+        champ_score = summary['champion_composite']['composite']
+        print(f"Scored: challenger={{ch_score}}, champion={{champ_score}}")
+
+        # --- Promotion logic (same as Celery task) ---
+        model = await db.get(MLModel, run.model_id)
+        if not model:
+            await db.commit()
+            return
+
+        reg_acc = summary.get('accuracy', 0)
+        if isinstance(reg_acc, (int, float)) and reg_acc < 1:
+            pass  # already a fraction
+        elif isinstance(reg_acc, (int, float)):
+            reg_acc = reg_acc / 100  # convert from percentage
+
+        should_promote = (
+            ch_score > 0
+            and reg_acc >= 0.60
+            and ch_score > champ_score
+        )
+
+        if should_promote:
+            old_live = list(await db.scalars(
+                select(MLModel).where(
+                    MLModel.model_type == model.model_type,
+                    MLModel.status == 'live',
+                )
+            ))
+            for old in old_live:
+                old.status = 'tested'
+            model.status = 'live'
+            print(f"PROMOTED {{model.name}} to live ({{ch_score}} > {{champ_score}})")
+        else:
+            if model.status == 'new':
+                model.status = 'tested'
+            print(f"Not promoted {{model.name}} (challenger={{ch_score}} vs champion={{champ_score}}, reg_acc={{reg_acc:.0%}})")
+
         await db.commit()
-        print(f"Scored: ch={{summary['challenger_composite']['composite']}}, champ={{summary['champion_composite']['composite']}}")
 
 asyncio.run(score())
 """
