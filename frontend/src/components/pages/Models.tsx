@@ -1771,6 +1771,8 @@ function CodexActivityPanel() {
   const [lines, setLines] = React.useState<string[]>([]);
   const [offset, setOffset] = React.useState(0);
   const [running, setRunning] = React.useState(false);
+  const [daemonAlive, setDaemonAlive] = React.useState(false);
+  const [daemonMessage, setDaemonMessage] = React.useState<string | null>(null);
   const [collapsed, setCollapsed] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
@@ -1804,14 +1806,19 @@ function CodexActivityPanel() {
           setOffset(data.offset);
           setTimeout(() => scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight), 50);
         }
-        setRunning(data.running);
+        // `running` now means Codex itself is iterating right now; the
+        // daemon-alive signal is surfaced separately so the panel can show
+        // an honest "idle / supervising" state when Codex isn't running.
+        setRunning(Boolean(data.running));
+        setDaemonAlive(Boolean(data.daemon_alive));
+        setDaemonMessage(data.daemon_message ?? null);
       } catch {}
     }, 2000);
     return () => clearInterval(poll);
   }, [offset]);
 
-  // Don't show if no activity ever
-  if (lines.length === 0 && !running) {
+  // Don't show if no activity ever AND nothing supervising
+  if (lines.length === 0 && !running && !daemonAlive) {
     return null;
   }
 
@@ -1826,11 +1833,17 @@ function CodexActivityPanel() {
           <span className="text-sm font-medium text-gray-200">Codex Auto-Improve</span>
           {running && (
             <span className="flex items-center gap-1 text-xs text-green-400 animate-pulse">
-              <Loader2 className="w-3 h-3 animate-spin" /> Running
+              <Loader2 className="w-3 h-3 animate-spin" /> Codex running
             </span>
           )}
-          {!running && lines.length > 0 && (
-            <span className="text-xs text-gray-500">Not running</span>
+          {!running && daemonAlive && (
+            <span className="flex items-center gap-1 text-xs text-blue-400">
+              <span className="w-2 h-2 rounded-full bg-blue-400" /> Daemon idle
+              {daemonMessage ? ` — ${daemonMessage}` : ''}
+            </span>
+          )}
+          {!running && !daemonAlive && lines.length > 0 && (
+            <span className="text-xs text-gray-500">Stopped</span>
           )}
         </div>
         <span className="text-xs text-gray-500">{collapsed ? '▸' : '▾'}</span>
@@ -1903,7 +1916,12 @@ function CodexActivityPanel() {
             return <div key={i} className="text-gray-500 text-xs pl-[72px]">{line}</div>;
           })}
           {running && <div className="text-green-400 animate-pulse mt-2 pl-[72px] text-xs">Codex is working...</div>}
-          {!running && lines.length > 0 && <div className="text-gray-500 mt-2 pl-[72px] text-xs">Codex stopped</div>}
+          {!running && daemonAlive && lines.length > 0 && (
+            <div className="text-blue-400 mt-2 pl-[72px] text-xs">
+              Codex finished. Daemon idle{daemonMessage ? ` — ${daemonMessage}` : ''}.
+            </div>
+          )}
+          {!running && !daemonAlive && lines.length > 0 && <div className="text-gray-500 mt-2 pl-[72px] text-xs">Codex stopped (daemon not running)</div>}
           {lines.length === 0 && <div className="text-gray-600 text-xs pl-[72px]">Waiting for activity...</div>}
         </div>
       )}

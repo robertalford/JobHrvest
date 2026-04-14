@@ -1,3 +1,9 @@
+## 2026-04-15
+
+- Fixed pagination controls being emitted as jobs (for example `Show 8 more`) by adding a generic post-extraction non-job filter in `TieredExtractorV70`.
+- Fixed section-heading leakage (`Working with us`) in linked-card outputs by extending the same v7.0 post-filter to reject obvious non-role labels.
+- Preserved extraction volume while improving quality/coverage on the v7.0 fixture harness: job count unchanged, non-job titles reduced to zero, and description/location fill significantly improved via the existing v7.0 listing-context enrichment.
+
 ## 2026-04-07
 
 - Fixed discovery timeout pattern on TLS-mismatch hint URLs by adding insecure hint retry + scheme alternate fallback in `CareerPageFinderV67`.

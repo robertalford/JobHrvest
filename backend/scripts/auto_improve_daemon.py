@@ -164,7 +164,16 @@ def find_model_needing_improvement(token: str) -> dict | None:
 
     if best_model and best_score > 0 and latest_score < best_score * 0.95:
         log(f"⚠️ {latest_completed['name']} regressed ({latest_score:.1f} < {best_score:.1f}). "
-            f"Rolling back to {best_model['name']} as improvement base.")
+            f"Rolling back to {best_model['name']} as improvement base "
+            f"(but using {latest_completed['name']}'s test data for analysis).")
+        # Critical: graft the LATEST test run onto the best_model so
+        # `run_improvement`'s analyse_results sees the *recent* failures,
+        # not the best_model's stale historical run. Otherwise Codex
+        # iterates on baseline data from weeks ago and ignores the actual
+        # regression that triggered the rollback in the first place.
+        best_model = dict(best_model)
+        best_model["latest_test_run"] = latest_completed.get("latest_test_run")
+        best_model["_rollback_from"] = latest_completed.get("name")
         return best_model
 
     return latest_completed
@@ -740,6 +749,199 @@ def run_improvement(model: dict, token: str):
             "description": description,
         })
 
+    # Persist champion/challenger state into git so clones can restore.
+    # Captures: source model's final A/B metrics + newly-written challenger
+    # code + updated Codex memory, as a single coherent commit per iteration.
+    try:
+        commit_model_snapshot(model, next_version, imp_run_id)
+    except Exception as e:
+        log(f"⚠️ commit_model_snapshot failed (non-fatal): {e}")
+
+
+def _already_snapshotted(test_run_id: str) -> bool:
+    """Idempotency: skip commit if the last 20 commits already mention this test_run_id."""
+    if not test_run_id:
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "-C", ROOT_DIR, "log", "-n", "20", "--format=%B"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return test_run_id in (res.stdout or "")
+    except Exception:
+        return False
+
+
+def commit_model_snapshot(model: dict, next_version: str | None = None,
+                          imp_run_id: str | None = None) -> None:
+    """Persist champion/challenger state into git.
+
+    Regenerates ``database/models_snapshot.sql`` from the live DB (models-only,
+    data-only), mirrors the Codex-facing memory files into the tracked
+    ``database/`` path, stages any new extractor code, commits, and pushes.
+    Idempotent via the source test_run_id embedded in the commit message.
+
+    Called from two paths:
+      1) ``run_improvement`` once the new challenger file exists (captures
+         source outcome + new code in one commit).
+      2) ``_process_snapshot_triggers`` on every completed A/B test — so
+         outcomes are persisted within ~30s even when no iteration runs next.
+    """
+    model_name = model.get("name", "unknown")
+    tr = model.get("latest_test_run") or {}
+    test_run_id = tr.get("id") or ""
+    rd = tr.get("results_detail") or {}
+    summary = rd.get("summary") or {}
+    ch_comp = (summary.get("challenger_composite") or {})
+    champ_comp = (summary.get("champion_composite") or {})
+    promo = summary.get("promotion_decision") or {}
+    promoted = bool(promo.get("promote"))
+    source_status = model.get("status", "?")
+
+    if _already_snapshotted(test_run_id):
+        log(f"  snapshot: test_run {test_run_id[:8]} already committed — skipping")
+        return
+
+    # 1) Regenerate models-only SQL dump
+    dump_script = os.path.join(ROOT_DIR, "database", "dump_models.sh")
+    if not os.path.exists(dump_script):
+        log(f"  snapshot: {dump_script} missing — skipping")
+        return
+    try:
+        subprocess.run(["bash", dump_script], cwd=ROOT_DIR,
+                       capture_output=True, text=True, timeout=60, check=True)
+    except subprocess.CalledProcessError as e:
+        log(f"  snapshot: dump failed — {e.stderr[:200] if e.stderr else e}")
+        return
+    except Exception as e:
+        log(f"  snapshot: dump error — {e}")
+        return
+
+    # 2) Mirror Codex-facing memory files into the git-tracked `database/` path.
+    #    The live copies in `storage/` stay put so `memory_store.py` resolution
+    #    is untouched — these are read-only mirrors for clone restore.
+    for src_name in ("auto_improve_memory.json", "auto_improve_history.json"):
+        src = os.path.join(ROOT_DIR, "storage", src_name)
+        dst = os.path.join(ROOT_DIR, "database", src_name)
+        try:
+            if os.path.exists(src):
+                import shutil
+                shutil.copy2(src, dst)
+        except Exception as e:
+            log(f"  snapshot: mirror {src_name} failed — {e}")
+
+    # 3) Stage + commit
+    try:
+        subprocess.run(
+            ["git", "-C", ROOT_DIR, "add",
+             "database/models_snapshot.sql",
+             "database/auto_improve_memory.json",
+             "database/auto_improve_history.json",
+             "backend/app/crawlers/"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        staged = subprocess.run(
+            ["git", "-C", ROOT_DIR, "diff", "--cached", "--quiet"],
+            capture_output=True, timeout=10,
+        )
+        if staged.returncode == 0:
+            log("  snapshot: nothing to commit")
+            return
+
+        outcome = "PROMOTED" if promoted else "evaluated"
+        ch_val = ch_comp.get("composite", "?")
+        champ_val = champ_comp.get("composite", "?")
+        axes = (
+            f"disc {ch_comp.get('discovery', '?')} · "
+            f"qual {ch_comp.get('quality_extraction', '?')} · "
+            f"vol {ch_comp.get('volume_accuracy', '?')} · "
+            f"fields {ch_comp.get('field_completeness', '?')}"
+        ) if ch_comp else "(no scores)"
+
+        challenger_note = f" · challenger {next_version} created" if next_version else ""
+        subject = (
+            f"chore(models): {model_name} {outcome}{challenger_note} "
+            f"({ch_val} vs {champ_val})"
+        )
+        body = (
+            f"Source model:    {model_name} (status: {source_status})\n"
+            f"Source composite: {ch_val}   {axes}\n"
+            f"Champion composite: {champ_val}\n"
+            f"Promotion:       {'yes' if promoted else 'no'}\n"
+            f"Test run:        {test_run_id or 'n/a'}\n"
+            f"Challenger:      {next_version or '(none — state-only snapshot)'}\n"
+            f"Improvement run: {imp_run_id or 'n/a'}\n"
+            f"\n"
+            f"Snapshot scope: ml_models, model_versions, experiments,\n"
+            f"codex_improvement_runs, metric_snapshots, gold_holdout_*,\n"
+            f"ats_pattern_proposals, drift_baselines. Memory mirrors:\n"
+            f"database/auto_improve_memory.json, database/auto_improve_history.json.\n"
+            f"\n"
+            f"Co-Authored-By: Codex Auto-Improve <auto-improve@jobharvest.local>"
+        )
+        msg = f"{subject}\n\n{body}"
+        commit = subprocess.run(
+            ["git", "-C", ROOT_DIR, "commit", "-m", msg],
+            capture_output=True, text=True, timeout=30,
+        )
+        if commit.returncode != 0:
+            log(f"  snapshot: commit failed — {commit.stderr[:200]}")
+            return
+        log(f"  snapshot: committed ({subject[:70]}…)")
+
+        # 4) Push — non-fatal if it fails (next iteration retries).
+        push = subprocess.run(
+            ["git", "-C", ROOT_DIR, "push", "origin", "main"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if push.returncode == 0:
+            log("  snapshot: pushed to origin/main")
+        else:
+            log(f"  snapshot: push deferred — {push.stderr[:200]}")
+    except Exception as e:
+        log(f"  snapshot: unexpected error — {e}")
+
+
+def _process_snapshot_triggers(token: str) -> None:
+    """Consume ``storage/model_snapshot_triggers/*.trigger`` files and commit each.
+
+    Written by ``ml_tasks.execute_model_test`` on every A/B completion so the
+    result is in git within ~30s (one poll cycle) regardless of whether
+    auto-improve is enabled for a next iteration. Idempotent: a completed
+    snapshot's trigger is always removed; a failed one is removed too to
+    avoid head-of-queue blocking (next iteration's commit will still capture
+    state).
+    """
+    trigger_dir = os.path.join(ROOT_DIR, "storage", "model_snapshot_triggers")
+    if not os.path.isdir(trigger_dir):
+        return
+    triggers = sorted(f for f in os.listdir(trigger_dir) if f.endswith(".trigger"))
+    if not triggers:
+        return
+    for fname in triggers:
+        path = os.path.join(trigger_dir, fname)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            model_id = data.get("model_id")
+            if not model_id:
+                os.remove(path)
+                continue
+            try:
+                fresh = api_get(f"/ml-models/{model_id}", token)
+            except Exception as e:
+                log(f"  snapshot trigger {fname}: fetch model failed — {e}")
+                os.remove(path)
+                continue
+            commit_model_snapshot(fresh, next_version=None, imp_run_id=None)
+            os.remove(path)
+        except Exception as e:
+            log(f"  snapshot trigger {fname} error — {e}")
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
 
 def _install_signal_handlers():
     def _graceful(sig, frame):
@@ -768,6 +970,14 @@ def main():
                 log("⚠️ Auth failed — retrying in 60s")
                 time.sleep(60)
                 continue
+
+            # Consume any pending snapshot triggers before anything else so
+            # A/B outcomes land in git promptly, independent of the iteration
+            # pipeline.
+            try:
+                _process_snapshot_triggers(token)
+            except Exception as e:
+                log(f"snapshot-trigger pass failed (non-fatal): {e}")
 
             if is_test_running(token):
                 _write_status("Waiting for test to complete...")

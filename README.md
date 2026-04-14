@@ -44,21 +44,41 @@ SEEK, Jora, Jobstreet, and JobsDB are completely off-limits and blocked at the H
 ## Quick Start
 
 ```bash
-# Install and start Colima
+# Install and start Colima (macOS) — on Linux, Docker Engine is enough
 brew install colima docker docker-compose
 colima start --cpu 4 --memory 8 --disk 60
 
 # Clone and start
 git clone https://github.com/robertalford/JobHrvest
 cd JobHrvest
+git lfs install                      # LFS-tracked files: `database/jobharvest_latest.dump`
 cp .env.example .env
 make up
-make db-migrate
-make db-seed
+make db-migrate                      # apply Alembic schema
+make models-restore                  # restore champion/challenger state + history (see below)
+make db-seed                         # seed reference data (markets, seed companies, etc.)
 ```
 
 Dashboard: http://localhost  
 API docs: http://localhost:8000/api/v1/docs
+
+### Server / production deploy
+
+The default `docker-compose.yml` is **dev-only** (Caddy on :8080, Vite HMR). Server deploys MUST use `docker-compose.server.yml`:
+
+```bash
+docker compose -f docker-compose.server.yml up -d --build
+docker compose -f docker-compose.server.yml exec api alembic upgrade head
+make models-restore                  # same step on the server
+```
+
+### Champion/Challenger state on a fresh clone
+
+The champion/challenger models, A/B history, experiments, metric snapshots, GOLD holdout fixtures, and Codex iteration memory are **committed** into the repo at `database/models_snapshot.sql` (plain SQL, diff-friendly, no Git LFS). Every auto-improve iteration regenerates and commits this file so a clone is always aligned to the current live champion.
+
+- **Restore:** `make models-restore` wraps `psql < database/models_snapshot.sql` (TRUNCATE + INSERT under a transaction) and copies `database/auto_improve_memory.json` / `_history.json` into `storage/` where the running system reads them.
+- **Manual re-snapshot:** `make models-snapshot` regenerates, commits, and pushes on demand (the auto-improve daemon does this automatically at the end of every iteration).
+- **Full-DB disaster-recovery backup** is a separate artefact at `database/jobharvest_latest.dump` (Git LFS, replaced hourly by cron). Use that if you also need jobs/companies/leads, not just model state.
 
 ## Common Commands
 
@@ -68,6 +88,8 @@ make down            # Stop all services
 make logs            # Tail logs
 make db-migrate      # Run migrations
 make db-seed         # Seed database
+make models-restore  # Restore champion/challenger state from database/models_snapshot.sql
+make models-snapshot # Manually dump + commit + push current model state
 make crawl-trigger   # Trigger full crawl cycle
 make health          # Check system health
 make shell-api       # Shell into API container

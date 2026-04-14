@@ -1372,6 +1372,28 @@ async def _aggregate(
                     }, tf)
                 logger.info("Auto-improve trigger written for %s", model.name)
 
+            # Snapshot trigger — fires for EVERY completed A/B test so the
+            # host-side auto-improve daemon can commit the outcome to git
+            # within one poll cycle (~30s), independent of the auto-improve
+            # flag. The daemon mounts /storage as a bind volume and processes
+            # `storage/model_snapshot_triggers/*.trigger` via
+            # `auto_improve_daemon._process_snapshot_triggers`.
+            try:
+                import os as _os2, json as _j3
+                snap_dir = "/storage/model_snapshot_triggers"
+                _os2.makedirs(snap_dir, exist_ok=True)
+                with open(_os2.path.join(snap_dir, f"{run_id}.trigger"), "w") as sf:
+                    _j3.dump({
+                        "model_id": model_id,
+                        "model_name": model.name,
+                        "test_run_id": run_id,
+                        "promoted": bool(should_promote),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }, sf)
+                logger.info("Snapshot trigger written for %s (test_run=%s)", model.name, run_id)
+            except Exception as snap_err:  # noqa: BLE001 — snapshot is advisory
+                logger.warning("snapshot trigger write failed: %s", snap_err)
+
     logger.info("Test run %s completed: %d sites, %d passed", run_id, len(site_results), passed)
 
 

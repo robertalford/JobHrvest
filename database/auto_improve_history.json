@@ -1,0 +1,386 @@
+[
+  {
+    "model": "3-Tier Hybrid Extractor v1.6",
+    "accuracy": 0.51,
+    "baseline_accuracy": 0.49,
+    "timestamp": "2026-04-02T12:01:25.328368"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v1.8",
+    "accuracy": 0.6666666666666666,
+    "baseline_accuracy": 0.6190476190476191,
+    "timestamp": "2026-04-02T12:52:50.789916"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v1.9",
+    "accuracy": 0.71875,
+    "baseline_accuracy": 0.734375,
+    "timestamp": "2026-04-02T13:26:30.478983"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.0",
+    "accuracy": 0.55,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T14:21:52.553702"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.1",
+    "accuracy": 0.76,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T15:30:27.237346"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.2",
+    "accuracy": 0.76,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T20:10:26.256784"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.3",
+    "accuracy": 0.6875,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T21:52:03.987291"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.4",
+    "accuracy": 0.7083333333333334,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T22:45:24.325870"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.5",
+    "accuracy": 0.03125,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T23:17:58.961230"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.6",
+    "accuracy": 0.8181818181818182,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-02T23:45:33.751500"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.7",
+    "accuracy": 0.8181818181818182,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T00:13:37.199299"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.8",
+    "accuracy": 0.7894736842105263,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T00:40:32.755282"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v2.9",
+    "accuracy": 0.8095238095238095,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T01:19:42.416408"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.0",
+    "accuracy": 0.7894736842105263,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T01:45:31.076390"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.1",
+    "accuracy": 0.7619047619047619,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T02:28:24.487531"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.2",
+    "accuracy": 0.7894736842105263,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T03:00:37.974340"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.3",
+    "accuracy": 0.75,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T03:30:53.080127"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.4",
+    "accuracy": 0.7619047619047619,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T03:55:34.344919"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.5",
+    "accuracy": 0.7894736842105263,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T04:26:28.558230"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.6",
+    "accuracy": 0.8,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T04:58:28.024922"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.7",
+    "accuracy": 0.6818181818181818,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T05:25:47.850442"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.8",
+    "accuracy": 0.6666666666666666,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T05:55:18.956363"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v3.9",
+    "accuracy": 0.6875,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T06:23:18.356949"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.0",
+    "accuracy": 0.7272727272727273,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T06:46:14.521677"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.1",
+    "accuracy": 0.5625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T07:13:27.147815"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.2",
+    "accuracy": 0.625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T07:39:06.529139"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.3",
+    "accuracy": 0.625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T08:00:53.503705"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.4",
+    "accuracy": 0.625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T08:19:42.842695"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.5",
+    "accuracy": 0.625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T08:53:42.642752"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.6",
+    "accuracy": 0.5,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T09:40:32.252295"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.7",
+    "accuracy": 0.5882352941176471,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T10:04:49.380347"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.8",
+    "accuracy": 0.5333333333333333,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T10:32:50.562256"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v4.9",
+    "accuracy": 0.5625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T11:03:54.137507"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v5.0",
+    "accuracy": 0.5,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T11:29:09.897856"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v5.1",
+    "accuracy": 0.5925925925925926,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T11:59:10.368253"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v5.2",
+    "accuracy": 0.7333333333333333,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T12:24:06.326308"
+  },
+  {
+    "model": "3-Tier Hybrid Extractor v5.3",
+    "accuracy": 0.75,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-03T12:54:51.777246"
+  },
+  {
+    "model": "v6.3",
+    "accuracy": 0.6363636363636364,
+    "baseline_accuracy": 0.9090909090909091,
+    "timestamp": "2026-04-07T17:43:10.587628"
+  },
+  {
+    "model": "v6.6",
+    "accuracy": 0.9090909090909091,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T18:16:29.913739"
+  },
+  {
+    "model": "v6.7",
+    "accuracy": 1.0,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T18:42:45.578429"
+  },
+  {
+    "model": "v6.8",
+    "accuracy": 1.0,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T19:08:13.106579"
+  },
+  {
+    "model": "v6.9",
+    "accuracy": 1.0,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T19:27:29.708388"
+  },
+  {
+    "model": "v7.0",
+    "accuracy": 0.32,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T21:59:37.110810"
+  },
+  {
+    "model": "v7.1",
+    "accuracy": 0.3,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-07T23:24:54.283654"
+  },
+  {
+    "model": "v7.2",
+    "accuracy": 0.6,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T00:07:20.303927"
+  },
+  {
+    "model": "v7.3",
+    "accuracy": 0.4090909090909091,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T01:27:49.331522"
+  },
+  {
+    "model": "v7.4",
+    "accuracy": 0.375,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T02:47:01.922019"
+  },
+  {
+    "model": "v7.5",
+    "accuracy": 0.2,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T04:08:18.184000"
+  },
+  {
+    "model": "v7.6",
+    "accuracy": 0.4,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T05:27:28.311438"
+  },
+  {
+    "model": "v7.7",
+    "accuracy": 0.5,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T06:46:09.616037"
+  },
+  {
+    "model": "v7.8",
+    "accuracy": 0.6875,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T07:59:43.754033"
+  },
+  {
+    "model": "v7.9",
+    "accuracy": 0.4583333333333333,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T10:42:51.741477"
+  },
+  {
+    "model": "v8.0",
+    "accuracy": 0.75,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T12:15:18.654181"
+  },
+  {
+    "model": "v8.1",
+    "accuracy": 0.6,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T14:18:48.219114"
+  },
+  {
+    "model": "v8.2",
+    "accuracy": 0.5833333333333334,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T16:48:50.193261"
+  },
+  {
+    "model": "v8.3",
+    "accuracy": 0.4166666666666667,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T17:50:51.696728"
+  },
+  {
+    "model": "v8.4",
+    "accuracy": 0.4375,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T18:13:09.600182"
+  },
+  {
+    "model": "v8.5",
+    "accuracy": 0.5625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T18:39:53.336554"
+  },
+  {
+    "model": "v8.6",
+    "accuracy": 0.4375,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T18:59:27.771400"
+  },
+  {
+    "model": "v8.7",
+    "accuracy": 0.625,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T19:26:20.429476"
+  },
+  {
+    "model": "v8.8",
+    "accuracy": 0.4583333333333333,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T20:09:42.333082"
+  },
+  {
+    "model": "v8.9",
+    "accuracy": 0.3125,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T20:28:09.110501"
+  },
+  {
+    "model": "v9.0",
+    "accuracy": 0.4,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T20:59:44.032008"
+  },
+  {
+    "model": "v9.1",
+    "accuracy": 0.5,
+    "baseline_accuracy": 0,
+    "timestamp": "2026-04-08T21:20:23.768535"
+  }
+]

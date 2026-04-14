@@ -588,12 +588,17 @@ async def get_auto_improve_activity(
             pass
 
     # Process check runs inside Docker and can't see host processes,
-    # so also treat a fresh (recently written) log as "running"
+    # so also treat a fresh (recently written) log as "running".
     log_is_fresh = not log_stale  # modified within last 60s
-    # Daemon alive (from status file) takes priority over log_says_done,
-    # because "exited with code" in the log just means a previous Codex run
-    # finished — the daemon itself may still be running and waiting.
-    running = daemon_alive or ((process_alive or log_is_fresh) and not log_says_done)
+
+    # `running` MUST mean "Codex is actively iterating right now", not "the
+    # daemon is alive somewhere". Conflating the two left the UI panel
+    # stuck on "Codex is working…" for hours after Codex had cleanly
+    # exited and the daemon was just waiting for the next test to finish.
+    # Surface daemon liveness as a separate field so the UI can render
+    # an idle-but-supervised state without the misleading Codex badge.
+    codex_running = (process_alive or log_is_fresh) and not log_says_done
+    running = codex_running
 
     # Also check supervisor log for recent health check messages
     supervisor_lines = []
@@ -613,10 +618,25 @@ async def get_auto_improve_activity(
 
     combined = [l.rstrip("\n") for l in new_lines] + supervisor_lines
 
+    # Surface daemon liveness + the activity it's currently waiting on so
+    # the UI can render an honest "idle / supervising" state when Codex
+    # itself isn't running but the loop is healthy.
+    daemon_message = None
+    if daemon_alive and status_file and os.path.exists(status_file):
+        try:
+            import json as _json
+            with open(status_file) as sf:
+                daemon_message = (_json.load(sf) or {}).get("message")
+        except Exception:
+            pass
+
     return {
         "lines": combined,
         "offset": len(all_lines),
-        "running": running,
+        "running": running,                 # Codex actively iterating
+        "codex_running": codex_running,     # explicit alias (forwards-compat)
+        "daemon_alive": daemon_alive,
+        "daemon_message": daemon_message,
         "model": model_id,
         "log_file": os.path.basename(latest),
     }

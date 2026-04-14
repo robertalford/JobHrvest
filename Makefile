@@ -1,4 +1,4 @@
-.PHONY: help up down restart logs db-migrate db-seed shell-api shell-db reset pull-model deploy-frontend
+.PHONY: help up down restart logs db-migrate db-seed shell-api shell-db reset pull-model deploy-frontend models-restore models-snapshot
 
 DOCKER_COMPOSE = docker compose
 COLIMA_CPU     = 4
@@ -43,6 +43,25 @@ db-reset: ## Drop and recreate database (DESTRUCTIVE)
 	$(DOCKER_COMPOSE) exec api alembic downgrade base
 	$(DOCKER_COMPOSE) exec api alembic upgrade head
 	$(DOCKER_COMPOSE) exec api python scripts/seed.py
+
+models-restore: ## Restore champion/challenger models + history from database/models_snapshot.sql
+	@test -f database/models_snapshot.sql || (echo "database/models_snapshot.sql not found — nothing to restore"; exit 1)
+	docker exec -i jobharvest-postgres psql -U jobharvest -d jobharvest < database/models_snapshot.sql
+	@mkdir -p storage
+	@test -f database/auto_improve_memory.json && cp database/auto_improve_memory.json storage/auto_improve_memory.json || echo "(no memory mirror to restore)"
+	@test -f database/auto_improve_history.json && cp database/auto_improve_history.json storage/auto_improve_history.json || echo "(no history mirror to restore)"
+	@echo "✅ Models + memory restored from database/models_snapshot.sql"
+
+models-snapshot: ## Manually regenerate + commit + push models snapshot (daemon does this automatically per iteration)
+	bash database/dump_models.sh
+	@mkdir -p database
+	@test -f storage/auto_improve_memory.json && cp storage/auto_improve_memory.json database/auto_improve_memory.json || true
+	@test -f storage/auto_improve_history.json && cp storage/auto_improve_history.json database/auto_improve_history.json || true
+	git add database/models_snapshot.sql database/auto_improve_memory.json database/auto_improve_history.json backend/app/crawlers/ || true
+	@if git diff --cached --quiet; then echo "No model changes to commit"; else \
+		git commit -m "chore(models): manual snapshot via make models-snapshot" && \
+		git push origin main || echo "⚠️ push deferred (commit stays local)"; \
+	fi
 
 shell-api: ## Open shell in API container
 	$(DOCKER_COMPOSE) exec api bash

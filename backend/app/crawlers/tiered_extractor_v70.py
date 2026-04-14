@@ -22,6 +22,8 @@ _NON_JOB_TITLE = re.compile(
     r"join\s+our\s+team|working\s+with\s+us)$",
     re.IGNORECASE,
 )
+_SHOW_MORE_TITLE = re.compile(r"^show\s+\d+\s+more$", re.IGNORECASE)
+
 class TieredExtractorV70(TieredExtractorV16):
     """v7.0 extractor: keep v6.9 precision and fill missing listing fields."""
 
@@ -35,6 +37,7 @@ class TieredExtractorV70(TieredExtractorV16):
         if methods == {"tier2_linked_cards_v67"}:
             jobs = self._merge_with_broader_tier2_v70(jobs, page_url, html or "", v69)
         jobs = self._enrich_from_listing_context_v70(jobs, page_url, html or "", v69)
+        jobs = self._drop_obvious_non_jobs_v70(jobs)
         return jobs[:MAX_JOBS_PER_PAGE]
 
     @staticmethod
@@ -196,3 +199,22 @@ class TieredExtractorV70(TieredExtractorV16):
     @staticmethod
     def _norm_url_v70(value: str) -> str:
         return str(value or "").strip().rstrip("/")
+
+    def _drop_obvious_non_jobs_v70(self, jobs: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for job in jobs:
+            title = self._clean_v70(str(job.get("title") or ""))
+            if not title:
+                continue
+            title_l = title.lower()
+            source_url = self._norm_url_v70(job.get("source_url") or "")
+
+            if _NON_JOB_TITLE.match(title) or _SHOW_MORE_TITLE.match(title):
+                continue
+            if "/show_more" in source_url and title_l.startswith("show "):
+                continue
+
+            item = dict(job)
+            item["title"] = title
+            out.append(item)
+        return out

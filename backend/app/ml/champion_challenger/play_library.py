@@ -38,19 +38,25 @@ def _resolve_default_dir() -> Path:
       1. ``PLAY_LIBRARY_DIR`` env var (explicit override).
       2. ``/storage/play_library`` if the bind mount exists (Docker container).
       3. Repo-root ``storage/play_library`` (host runs / unit tests).
+
+    Note on dirname count: this file lives at
+        <repo>/backend/app/ml/champion_challenger/play_library.py
+    so we need FIVE dirnames to climb back to <repo>: filename →
+    champion_challenger → ml → app → backend → <repo>. An off-by-one here
+    landed us at <repo>/backend/storage/play_library/, which is owned by
+    root (created via the docker bind mount) and unwritable from the host
+    daemon — silently dropping every play write.
     """
     explicit = os.environ.get("PLAY_LIBRARY_DIR")
     if explicit:
         return Path(explicit)
     if os.path.isdir("/storage"):
         return Path("/storage/play_library")
-    return Path(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)
-        )))),
-        "storage",
-        "play_library",
-    ))
+    here = os.path.abspath(__file__)
+    repo_root = here
+    for _ in range(5):
+        repo_root = os.path.dirname(repo_root)
+    return Path(os.path.join(repo_root, "storage", "play_library"))
 
 
 _DEFAULT_DIR = _resolve_default_dir()

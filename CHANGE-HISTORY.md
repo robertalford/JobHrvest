@@ -2,6 +2,67 @@
 
 ---
 
+## 2026-04-15 (session 20 — Version-controlled champion/challenger models + history)
+
+**Prompt:**
+> We need to store the champion/challenger models in the project files, so anyone who clones the repo has access to the latest models. For every new model, do a database dump of the models (champion, challenger and history... with details of the model setup), so that if/when this project needs to be cloned, the db dump can be restored to the new local db with the current models, and history... requiring codex to perform this... then commit and push this at the end of each auto-improve iteration... and update the agent-instructions.md and readme.md on how to deploy/install.
+
+**What was done:**
+- New `database/dump_models.sh` — models-only plain-SQL dump (TRUNCATE + column-inserts) covering `ml_models`, `model_versions`, `experiments`, `codex_improvement_runs`, `metric_snapshots`, `gold_holdout_{sets,domains,jobs}`, `ats_pattern_proposals`, `drift_baselines`. Excludes `inference_metrics_hourly` (unbounded operational telemetry, regenerates naturally).
+- New `database/models_snapshot.sql` (32 KB, plain SQL, intentionally NOT Git LFS) — committed source of truth for champion/challenger state on a fresh clone.
+- New mirror files `database/auto_improve_memory.json` / `database/auto_improve_history.json` — copies of the Codex-facing memory files from `storage/` so iteration context survives a clone (storage/ stays gitignored).
+- `backend/scripts/auto_improve_daemon.py` — added `commit_model_snapshot()`, `_process_snapshot_triggers()`, `_already_snapshotted()`. Called from two paths: (1) end of `run_improvement()` once the new challenger file exists, (2) on every poll tick via trigger-file consumer so A/B outcomes land in git within ~30 s regardless of whether an iteration runs next. Idempotent via `test_run_id` embedded in commit messages.
+- `backend/app/tasks/ml_tasks.py` — after every test completion, writes `/storage/model_snapshot_triggers/<run_id>.trigger` for the daemon to pick up. Fires independently of the `auto_improve` flag so manual tests are also captured.
+- New `Makefile` targets: `models-restore` (wraps `psql < database/models_snapshot.sql` + copies memory mirrors into `storage/`) and `models-snapshot` (manual regenerate + commit + push).
+- `README.md` — updated Quick Start to include `git lfs install` + `make models-restore`, documented the models-only snapshot vs full-DB dump distinction, added new Make targets to Common Commands.
+- `agent-instructions.md` — rewrote "Database Management" with the new file table and 4-step restore paths (models-only normal path, full-DB disaster-recovery path), added new "Git-Tracked Model State" subsection explaining the two-layer commit flow + deterministic commit message format, updated "Improvement-Run Loop" with the new snapshot step, added the new scripts to "Key Files".
+
+**Why:**
+- Pre-change, champion/challenger state lived only in the local Postgres DB + Codex memory JSON (gitignored). A fresh `git clone` got the extractor code but no way to reconstitute which version was champion, its A/B history, metric snapshots, or Codex's banned-approaches list. The existing hourly full-DB dump (`jobharvest_latest.dump`, 176 MB LFS) is tied to cron, snapshots everything including jobs/companies, and may be out of sync with the committed code.
+- New design: small (~32 KB), plain-SQL, diff-friendly models-only snapshot committed as part of the auto-improve loop itself. One coherent commit per iteration captures source-model outcome + new challenger code + updated memory. Full-DB LFS dump kept for disaster recovery (different use case).
+
+**Commit-message format (deterministic, greppable):**
+```
+chore(models): <source> PROMOTED|evaluated · challenger <vXX> created (<ch_comp> vs <champ_comp>)
+```
+Signed `Co-Authored-By: Codex Auto-Improve <auto-improve@jobharvest.local>`.
+
+**Deployment:**
+- Restarted `jobharvest-api` + all 4 celery workers to pick up the `ml_tasks.py` snapshot-trigger write.
+- Daemon will be started post-commit; its first iteration exercises the full commit flow end-to-end.
+
+---
+
+## 2026-04-15 (session 19 — Auto-improve v7.0 stabilization pass)
+
+**Prompt:**
+Read and follow the instructions in `/storage/auto_improve_logs/bf05d0fd-db10-497f-a895-c461f8869854_prompt.md`.
+
+**What was done:**
+- Loaded and followed the run brief, `agent-instructions.md`, `MEMORY.md`, and `storage/auto_improve_memory.json`.
+- Audited existing `tiered_extractor_v70.py` / `career_page_finder_v70.py` from the prior timed-out run, then validated on the provided `storage/auto_improve_context/v7_0` fixtures.
+- Added a minimal precision guard in `TieredExtractorV70`:
+  - New `_drop_obvious_non_jobs_v70()` post-filter.
+  - Drops obvious non-job labels/pagination rows (`Show N more`, `Working with us`, and `/show_more` URL variants).
+  - Called after merge + listing-context enrichment so high-value field backfill remains intact.
+
+**Why:**
+- Step-0 review in the run brief flagged prior timeout/process issues; fixture validation showed live false positives still present (`Show 8 more`, `Working with us`) in `v69` output.
+- The guard is generic (not site-specific), low-risk, and improves Type-1 precision without reducing aggregate fixture volume.
+
+**Validation:**
+- `python -m pytest backend/tests/test_extractor_smoke.py -v --tb=short` → 6 passed.
+- Fixture harness (`v69` vs patched `v70`, 6 context HTML files):
+  - Total jobs: **374 → 374** (flat)
+  - Descriptions filled: **14 → 327** (+313)
+  - Locations filled: **254 → 349** (+95)
+  - Obvious non-job titles: **2 → 0**
+
+**Notes:**
+- Dynamic DB champion lookup was attempted but unavailable in this sandbox (`sqlalchemy`/`psycopg` missing). Used the prompt header (`v6.9`) for local fixture validation only.
+
+---
+
 ## 2026-04-14 (session 18 — Universality-first auto-improve: kill the regression cycle)
 
 **Prompt:**

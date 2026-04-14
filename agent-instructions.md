@@ -58,13 +58,17 @@ Build a locally-hosted, full-stack application called **JobHarvest** — an inte
 
 ## Database Management
 
-### Schema and Backups
+### Files
 
-| File | Purpose | Location |
-|------|---------|----------|
-| `database/create_db.sql` | Schema-only dump — DDL for all tables, indexes, constraints | Always up to date |
-| `database/jobharvest_latest.dump` | Full compressed backup (pg_dump custom format) | Replaced hourly |
-| `database/backup.sh` | Backup script run by cron | Runs every hour |
+| File | Purpose | Lifecycle |
+|------|---------|-----------|
+| `database/create_db.sql` | Schema-only dump — DDL for all tables, indexes, constraints | Regenerated on schema changes + hourly by `backup.sh` |
+| `database/jobharvest_latest.dump` | **Full-DB** compressed backup (pg_dump custom format, Git LFS) | Replaced hourly by cron. Disaster-recovery only. |
+| `database/models_snapshot.sql` | **Models-only** data dump — champion/challenger state + history + fixtures. Plain SQL, diff-friendly, **NOT** LFS-tracked. | Regenerated + committed + pushed by the auto-improve daemon after every iteration AND after every A/B completion (trigger-file driven). |
+| `database/auto_improve_memory.json` | Mirror of `storage/auto_improve_memory.json` for clone restore | Mirrored alongside `models_snapshot.sql` |
+| `database/auto_improve_history.json` | Mirror of `storage/auto_improve_history.json` for clone restore | Mirrored alongside `models_snapshot.sql` |
+| `database/backup.sh` | Hourly schema + full-DB dump script | Cron, every hour |
+| `database/dump_models.sh` | Models-only dump script invoked by the auto-improve daemon | Do not call manually unless debugging |
 
 ### Rules
 
@@ -72,18 +76,28 @@ Build a locally-hosted, full-stack application called **JobHarvest** — an inte
    ```bash
    docker exec jobharvest-postgres pg_dump -U jobharvest -d jobharvest --schema-only --no-owner --no-privileges > database/create_db.sql
    ```
+   If the new table holds model/champion/challenger state, also add it to the `TABLES=()` list in `database/dump_models.sh` so it's included in every models snapshot.
 
 2. **Automated hourly backups** are configured via cron (`crontab -l` to verify). The backup replaces the single `database/jobharvest_latest.dump` file — no accumulation.
 
-3. **To restore on a new machine:**
+3. **To restore on a fresh clone (normal path — models only):**
    ```bash
-   # Create the database
+   make up
+   make db-migrate                 # apply Alembic schema first
+   make models-restore             # TRUNCATE + INSERT from database/models_snapshot.sql
+   make db-seed
+   ```
+   This reproduces the exact champion/challenger state that was live when the committed snapshot was taken, plus Codex iteration memory.
+
+4. **To restore on a new machine (disaster-recovery path — full DB including jobs/companies/leads):**
+   ```bash
    docker exec -i jobharvest-postgres createdb -U jobharvest jobharvest 2>/dev/null || true
-   # Restore from backup
    docker exec -i jobharvest-postgres pg_restore -U jobharvest -d jobharvest --clean --if-exists < database/jobharvest_latest.dump
    ```
 
-4. **Git LFS** is used for `.dump` files (configured in `.gitattributes`). Ensure `git lfs install` is run on any new clone.
+5. **Manual snapshot:** `make models-snapshot` (regenerates, commits, pushes). The daemon does this automatically; use only when you want an out-of-band commit (e.g. after a manual fixture edit).
+
+6. **Git LFS** is used for `.dump` files (configured in `.gitattributes`). Ensure `git lfs install` is run on any new clone. `database/models_snapshot.sql` is plain SQL and intentionally NOT LFS-tracked — it must diff cleanly in PRs.
 
 ### Connection Details
 - **Host (from host):** localhost:5434
@@ -243,6 +257,45 @@ DB tables: `model_versions`, `gold_holdout_{sets,domains,snapshots,jobs}`, `expe
 
 **Why the existing TF-IDF classifier's F1=0.9963 is misleading:** its training labels are derived from `quality_score`, which is itself a rule set. The model is mimicking the rules, not learning ground truth. Treat it as an unverified baseline until re-evaluated against the GOLD holdout.
 
+### Git-Tracked Model State (snapshot + auto-commit)
+
+Champion/challenger state is persisted into git on every iteration so any fresh clone can restore the exact live champion + full history without needing the full-DB dump. Two layers:
+
+1. **Trigger-file path (every A/B completion):** [`backend/app/tasks/ml_tasks.py`](backend/app/tasks/ml_tasks.py) writes `storage/model_snapshot_triggers/<run_id>.trigger` whenever a test run finishes (promoted or rejected). The host-side auto-improve daemon consumes the trigger on its next 30 s poll via `_process_snapshot_triggers` in [`backend/scripts/auto_improve_daemon.py`](backend/scripts/auto_improve_daemon.py), which calls `commit_model_snapshot` → `database/dump_models.sh` → `git add/commit/push`.
+
+2. **End-of-iteration path (safety net):** `commit_model_snapshot` is also called at the end of `run_improvement()` so the new challenger's `.py` file is committed together with the source model's final outcome in a single coherent commit. Deduplicated against the trigger path via `_already_snapshotted(test_run_id)` which greps the last 20 commit messages.
+
+**What gets committed per snapshot:**
+
+- `database/models_snapshot.sql` — regenerated from the live DB (TRUNCATE + column-inserts for 10 model tables: `ml_models`, `model_versions`, `experiments`, `codex_improvement_runs`, `metric_snapshots`, `gold_holdout_{sets,domains,jobs}`, `ats_pattern_proposals`, `drift_baselines`).
+- `database/auto_improve_memory.json` / `database/auto_improve_history.json` — mirrors of the live files in `storage/` so Codex's iteration memory survives a clone.
+- `backend/app/crawlers/` — any newly-written `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` code Codex produced since the last commit.
+
+**Commit message format (deterministic, greppable):**
+
+```
+chore(models): v6.9 PROMOTED · challenger v6.10 created (86.8 vs 85.4)
+
+Source model:    v6.9 (status: live)
+Source composite: 86.8   disc 100 · qual 100 · vol 96 · fields 55
+Champion composite: 85.4
+Promotion:       yes
+Test run:        c1f3caac-ff49-44ea-bd51-b477b40a9d8b
+Challenger:      v6.10 (pending test)
+Improvement run: …
+
+Co-Authored-By: Codex Auto-Improve <auto-improve@jobharvest.local>
+```
+
+Rejections use `evaluated` instead of `PROMOTED`. State-only snapshots (trigger-file path, no new challenger yet) use `(none — state-only snapshot)` for the Challenger field.
+
+**Exclusions from the snapshot:**
+
+- `inference_metrics_hourly` — unbounded operational latency telemetry. Regenerates naturally from the running system; not needed for model identity.
+- Schema (DDL) — covered by Alembic migrations + `database/create_db.sql`. Snapshot is data-only.
+
+**Do not** commit model state by hand during ad-hoc work — let the daemon do it so the commit graph has one canonical author/format. If a snapshot is genuinely needed outside an iteration, use `make models-snapshot`.
+
 ### The Improvement-Run Loop (what happens per iteration)
 
 1. **A/B test the current champion** on the fixed regression suite (129 sites) + 50 exploration sites. Three phases per site:
@@ -253,7 +306,8 @@ DB tables: `model_versions`, `gold_holdout_{sets,domains,snapshots,jobs}`, `expe
 3. **Codex auto-improve** reads failure patterns from the test run + `storage/auto_improve_memory.json` and generates the next `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` iteration. Runs as a host-side daemon (triggered via `/storage/auto_improve_triggers/<model_id>.trigger` files; host-only because `codex` must run outside the container).
 4. **Register** the new version in `ml_models` and wire it into `_FINDER_MAP` in both [`ml_models.py`](backend/app/api/v1/endpoints/ml_models.py) and [`ml_tasks.py`](backend/app/tasks/ml_tasks.py).
 5. **Execute A/B test** → if the promotion gate passes, the challenger is atomically promoted to `live` and the next iteration repeats from step 1 with the new champion as the source. If it fails, the challenger is kept as `tested` and a new improvement run is spawned from the same champion.
-6. **Standalone mode:** the same champion can be run against a user-uploaded CSV of domains via the **Bulk Domain Processor** (`/site-config/bulk-process`) — upload CSV → get CSV back with `selector_*` columns filled when `extraction_confidence ≥ threshold` (default 0.8).
+6. **Snapshot into git** — at end of iteration AND on every A/B completion (trigger-file path), the daemon regenerates `database/models_snapshot.sql`, mirrors memory files into `database/`, stages new extractor code, and commits + pushes. See "Git-Tracked Model State" above.
+7. **Standalone mode:** the same champion can be run against a user-uploaded CSV of domains via the **Bulk Domain Processor** (`/site-config/bulk-process`) — upload CSV → get CSV back with `selector_*` columns filled when `extraction_confidence ≥ threshold` (default 0.8).
 
 ### Auto-Improve Agent Rules (Codex / Claude Agent SDK)
 
@@ -283,10 +337,13 @@ A valid extracted job MUST have:
 - [`tiered_extractor_vXX.py`](backend/app/crawlers/) — challenger iterations (highest-numbered file ≠ champion; champion is whichever has `status='live'` in DB).
 - [`career_page_finder_v26.py`](backend/app/crawlers/career_page_finder_v26.py) — proven discovery. **DO NOT MODIFY.**
 - [`career_page_finder_v69.py`](backend/app/crawlers/career_page_finder_v69.py) — finder paired with the current champion.
-- [`storage/auto_improve_memory.json`](storage/auto_improve_memory.json) — iteration history + anti-patterns (READ before, UPDATE after).
+- [`storage/auto_improve_memory.json`](storage/auto_improve_memory.json) — iteration history + anti-patterns (READ before, UPDATE after). Mirrored into git at [`database/auto_improve_memory.json`](database/auto_improve_memory.json) by the daemon.
 - [`new-prompt.md`](new-prompt.md) — auto-improve agent prompt.
 - [`backend/app/ml/champion_challenger/`](backend/app/ml/champion_challenger/) — registry, promotion, drift, ATS quarantine, latency, orchestrator (hardened loop).
 - [`backend/scripts/build_gold_holdout.py`](backend/scripts/build_gold_holdout.py) — materialise a frozen GOLD holdout from `lead_imports`.
+- [`backend/scripts/auto_improve_daemon.py`](backend/scripts/auto_improve_daemon.py) — host-side daemon. `commit_model_snapshot` + `_process_snapshot_triggers` implement the git-commit path.
+- [`database/dump_models.sh`](database/dump_models.sh) — models-only SQL dump (invoked by the daemon; see "Git-Tracked Model State").
+- [`database/models_snapshot.sql`](database/models_snapshot.sql) — committed champion/challenger state. Regenerated every iteration.
 
 ### Pre-Flight Checklist (before producing the next challenger)
 

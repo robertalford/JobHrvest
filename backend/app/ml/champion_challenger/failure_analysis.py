@@ -27,7 +27,14 @@ from typing import Optional
 
 import httpx
 
-from app.core.config import settings
+# `app.core.config.settings` is only needed for the LLM call in
+# `analyze_failures` (Ollama URL/model). The other public helpers in this
+# module (`build_next_iteration_brief`, `format_brief_for_prompt`,
+# `cluster_failures_by_ats`) are pure-Python and are imported by the
+# host-side auto_improve daemon, which often does not have the API
+# container's full dep set (notably `pydantic_settings`). Defer the import
+# into `analyze_failures` so the host-side code path doesn't break on
+# `ModuleNotFoundError: No module named 'pydantic_settings'`.
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +136,8 @@ async def analyze_failures(
         n=min(len(cases), 30),
         cases=_format_cases(cases),
     )
+
+    from app.core.config import settings  # deferred — see module-level note
 
     target_model = model or settings.OLLAMA_MODEL
 
