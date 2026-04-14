@@ -666,7 +666,7 @@ def test_single_site(
     company = site_data[1] if len(site_data) > 1 else "unknown"
 
     try:
-        result = asyncio.run(_run_site(site_data, model_name, champion_name, site_index))
+        result = asyncio.run(_run_site(site_data, model_name, champion_name, site_index, run_id))
     except Exception as e:
         logger.error("Site %d failed: %s", site_index, e, exc_info=True)
         result = {
@@ -720,8 +720,15 @@ def test_single_site(
                                champion_name, fixed_count, auto_improve))
 
 
-async def _run_site(site_data: list, model_name: str, champion_name: str | None, site_index: int) -> dict:
-    """Async implementation of single-site test."""
+async def _run_site(site_data: list, model_name: str, champion_name: str | None,
+                     site_index: int, run_id: str = "") -> dict:
+    """Async implementation of single-site test.
+
+    `run_id` keys the run-scoped discovery cache used inside _run_model_phase.
+    Was a pre-existing NameError when omitted (introduced when the cache
+    landed in session 17); now defaulted to "" so callers without the cache
+    optimisation still work.
+    """
     import asyncio
     import json as _json
     import httpx
