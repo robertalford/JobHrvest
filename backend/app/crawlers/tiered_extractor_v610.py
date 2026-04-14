@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from urllib.parse import urlsplit
 
 from app.crawlers.detail_enricher import DetailEnricher, EnrichmentBudget
 from app.crawlers.tiered_extractor_v16 import TieredExtractorV16, _title_has_job_noun
@@ -27,24 +29,11 @@ _V610_CTA_TITLE = re.compile(
     re.IGNORECASE,
 )
 _V610_TAXONOMY_HEADING = re.compile(r"^[A-Za-z][A-Za-z\\s,&|/-]{3,}$")
-_V610_NON_ROLE_TITLES = {
-    "start",
-    "browse jobs",
-    "search jobs",
-    "search all jobs",
-    "jobdetail",
-    "refer a friend",
-    "view all jobs",
-    "view jobs",
-    "current vacancies",
-    "open positions",
-    "explore jobs",
-    "explore jobs for all locations",
-    "diversity, equity & inclusion",
-    "diversity, equity and inclusion",
-}
+_V610_NON_ROLE_TITLES = {"start", "browse jobs", "search jobs", "search all jobs", "jobdetail", "refer a friend", "view all jobs", "view jobs", "current vacancies", "open positions", "explore jobs", "explore jobs for all locations", "diversity, equity & inclusion", "diversity, equity and inclusion"}
 _V610_MAX_FALLBACK_ADDITIONS = 8
 _V610_MAX_FALLBACK_ADDITIONS_WITH_GAP = 12
+_V610_ENRICH_WAIT_CAP_S = 12.0
+_V610_RESERVED_TEST_SUFFIXES = (".local", ".test", ".example", ".invalid")
 
 
 def _is_role_shape_v610(title: str) -> bool:
@@ -83,6 +72,13 @@ def _normalize_source_url_v610(source_url: str, page_url: str) -> str:
     return src
 
 
+def _is_reserved_test_host_v610(url: str) -> bool:
+    host = (urlsplit((url or "").strip()).hostname or "").lower().strip(".")
+    return bool(host) and (
+        host in {"localhost", "127.0.0.1", "::1"} or host.startswith("example.") or any(host.endswith(suffix) for suffix in _V610_RESERVED_TEST_SUFFIXES)
+    )
+
+
 class TieredExtractorV610(TieredExtractorV16):
     """Hotfix: preserve v6.9 behavior, then fill blank fields from detail pages."""
 
@@ -117,25 +113,50 @@ class TieredExtractorV610(TieredExtractorV16):
                 if not jobs:
                     return jobs
 
-        try:
-            from app.crawlers.http_client import ResilientHTTPClient
+        # Skip network enrichment for reserved test hosts so local fixture runs stay deterministic.
+        if _is_reserved_test_host_v610(page_url):
+            return jobs
 
-            client = ResilientHTTPClient()
+        try:
+            import httpx
+            from app.crawlers.domain_blocklist import assert_not_blocked
+
+            timeout = httpx.Timeout(4.0, connect=2.0)
 
             async def _fetch(url: str) -> str:
+                target = (url or "").strip()
+                if not target.lower().startswith(("http://", "https://")):
+                    return ""
                 try:
-                    response = await client.get(url)
-                    return response.text if hasattr(response, "text") else ""
+                    assert_not_blocked(target)
+                except Exception:  # noqa: BLE001
+                    return ""
+                try:
+                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                        response = await client.get(
+                            target,
+                            headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                        )
+                        if response.status_code >= 400:
+                            return ""
+                        return response.text if hasattr(response, "text") else ""
                 except Exception:  # noqa: BLE001
                     return ""
         except Exception:  # noqa: BLE001
+
             async def _fetch(url: str) -> str:
                 return ""
 
         ats_hint = getattr(company, "ats_platform", None)
         try:
             enricher = DetailEnricher(http_fetch=_fetch, budget=self._enrichment_budget)
-            jobs, _ = await enricher.enrich(jobs, ats=ats_hint, page_url=page_url)
+            enrich_timeout = min(_V610_ENRICH_WAIT_CAP_S, float(self._enrichment_budget.total_deadline_s) + 1.0)
+            jobs, _ = await asyncio.wait_for(
+                enricher.enrich(jobs, ats=ats_hint, page_url=page_url),
+                timeout=enrich_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("v6.10 detail enrichment timed out for %s", page_url)
         except Exception as exc:  # noqa: BLE001
             logger.warning("v6.10 detail enrichment failed for %s: %s", page_url, exc)
         return self._filter_non_role_jobs_v610(jobs)
