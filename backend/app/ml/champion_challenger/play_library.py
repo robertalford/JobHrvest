@@ -31,16 +31,29 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_DIR = Path(os.environ.get(
-    "PLAY_LIBRARY_DIR",
-    os.path.join(
+def _resolve_default_dir() -> Path:
+    """Resolve the play library directory.
+
+    Priority:
+      1. ``PLAY_LIBRARY_DIR`` env var (explicit override).
+      2. ``/storage/play_library`` if the bind mount exists (Docker container).
+      3. Repo-root ``storage/play_library`` (host runs / unit tests).
+    """
+    explicit = os.environ.get("PLAY_LIBRARY_DIR")
+    if explicit:
+        return Path(explicit)
+    if os.path.isdir("/storage"):
+        return Path("/storage/play_library")
+    return Path(os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)
         )))),
         "storage",
         "play_library",
-    ),
-))
+    ))
+
+
+_DEFAULT_DIR = _resolve_default_dir()
 
 
 @dataclass

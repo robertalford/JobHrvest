@@ -42,7 +42,10 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from urllib.parse import urlparse
 
+from app.crawlers.domain_blocklist import is_blocked
+from app.models.aggregator_source import AggregatorSource
 from app.models.champion_challenger import (
     GoldHoldoutSet,
     GoldHoldoutDomain,
@@ -51,6 +54,29 @@ from app.models.champion_challenger import (
 from app.models.lead_import import LeadImport
 
 logger = logging.getLogger(__name__)
+
+# Lead categories that represent actual company career pages — the only kind of
+# domain that belongs in a holdout for champion/challenger extraction evaluation.
+# Explicitly excludes: "job_board", "recruiter", "ats" (meta-listings, not single-
+# company career sites), and NULL categories.
+_VALID_LEAD_CATEGORIES = ("C. likely Career Site", "employer")
+
+# Non-career hosts that recur in lead_imports sample_linkout_urls but should
+# never be used as extraction targets: bulk feed hosts, public storage buckets,
+# and generic redirect shims. Aggregator domains themselves come from
+# aggregator_sources (loaded per-market at build time).
+_NON_CAREER_HOST_FRAGMENTS = (
+    "amazonaws.com",       # s3 feed dumps (joveo, careerwallet)
+    "linkedin.com",        # LinkedIn link-out shims
+    "careerone.com.au",    # aggregator
+    "superprof.com.au",    # marketplace
+    "volunteer.com.au",    # SEEK-affiliated volunteer feed
+    "staffing.com.au",     # aggregator
+    "ethicaljobs.com.au",  # aggregator
+    "m.hays.com.au",       # aggregator feed
+    "michaelpage.com.au",  # recruiter feed
+    "api-dev.",            # staging/test endpoints
+)
 
 
 class _HttpClient(Protocol):
@@ -133,11 +159,23 @@ class GoldHoldoutBuilder:
             skipped_duplicate=0,
         )
 
+        aggregator_hosts = await self._load_aggregator_hosts(session, market_id=market_id)
+
         seen_domains: set[str] = set()
         for lead in leads:
+            if report.domains_added >= max_domains:
+                break
             domain = (lead.origin_domain or "").strip().lower()
             if not domain or domain in seen_domains:
                 report.skipped_duplicate += 1
+                continue
+
+            seed_url = lead.sample_linkout_url or f"https://{domain}"
+            if self._is_non_career_target(
+                domain=domain, seed_url=seed_url, aggregator_hosts=aggregator_hosts,
+            ):
+                report.skipped_blocked += 1
+                logger.info("Holdout: skipped non-career / blocked host %s (lead %s)", domain, lead.id)
                 continue
             seen_domains.add(domain)
 
@@ -181,18 +219,75 @@ class GoldHoldoutBuilder:
         max_domains: int,
         require_expected_count: bool,
     ) -> list[LeadImport]:
-        stmt = select(LeadImport).where(LeadImport.country_id == market_id)
+        stmt = (
+            select(LeadImport)
+            .where(LeadImport.country_id == market_id)
+            .where(LeadImport.ad_origin_category.in_(_VALID_LEAD_CATEGORIES))
+        )
         if require_expected_count:
             stmt = stmt.where(LeadImport.expected_job_count.isnot(None))
             stmt = stmt.where(LeadImport.expected_job_count > 0)
-        # Prefer leads that have already been successfully crawled — they are
-        # most likely to give a clean snapshot.
+        # Over-select 3× to absorb aggregator/blocklist skips; the caller trims
+        # to max_domains after filtering.
         stmt = stmt.order_by(
             LeadImport.expected_job_count.desc().nullslast(),
             LeadImport.imported_at.desc(),
-        ).limit(max_domains)
+        ).limit(max_domains * 3)
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def _load_aggregator_hosts(
+        self, session: AsyncSession, *, market_id: str,
+    ) -> frozenset[str]:
+        """Return the set of aggregator netloc hosts for this market (+ globals)."""
+        stmt = select(AggregatorSource.base_url).where(
+            AggregatorSource.market.in_((market_id, "GLOBAL"))
+        )
+        hosts: set[str] = set()
+        for base_url, in (await session.execute(stmt)).all():
+            try:
+                host = urlparse(base_url).netloc.lower().lstrip("www.")
+                if host:
+                    hosts.add(host)
+            except Exception:
+                continue
+        return frozenset(hosts)
+
+    def _is_non_career_target(
+        self, *, domain: str, seed_url: str, aggregator_hosts: frozenset[str],
+    ) -> bool:
+        """True if the lead's domain/URL is an aggregator, a blocked site, or
+        a non-career host that should never appear in a holdout.
+        """
+        domain = (domain or "").lower().lstrip("www.")
+        seed_host = ""
+        try:
+            seed_host = urlparse(seed_url).netloc.lower().lstrip("www.")
+        except Exception:
+            pass
+
+        # Hardcoded + DB blocklist (SEEK / Jora / JobsDB / Jobstreet / excluded_sites)
+        candidate_url = seed_url if seed_url else f"https://{domain}"
+        if is_blocked(candidate_url):
+            return True
+        if domain and is_blocked(f"https://{domain}"):
+            return True
+
+        # Market-configured aggregator hosts (Indeed, LinkedIn, Glassdoor, Adzuna, …)
+        for host in (domain, seed_host):
+            if not host:
+                continue
+            if host in aggregator_hosts:
+                return True
+            if any(host.endswith(f".{agg}") or host == agg for agg in aggregator_hosts):
+                return True
+
+        # Fragment-based catch-all for recurring non-career hosts (CDN feeds, s3, etc.)
+        for fragment in _NON_CAREER_HOST_FRAGMENTS:
+            if fragment in domain or fragment in seed_host:
+                return True
+
+        return False
 
     async def _snapshot_domain(
         self, domain_row: GoldHoldoutDomain, lead: LeadImport,

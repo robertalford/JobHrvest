@@ -315,22 +315,23 @@ def cluster_failures_by_ats(entries: list[dict]) -> dict[str, list[dict]]:
 
 
 def _wrapper_selector_hint(entry: dict) -> dict:
-    """Pull the most-informative keys from baseline_full_wrapper."""
+    """Pull the 3 highest-signal keys from baseline_full_wrapper.
+
+    Matches ``auto_improve._compact_baseline_selectors`` — prompt + brief MUST
+    describe selectors the same way, and both pay tokens for every key inlined.
+    The full wrapper remains on disk in the per-iteration context dir for
+    Codex to open when it actually needs the rest.
+    """
     w = entry.get("baseline_full_wrapper") or {}
     if not isinstance(w, dict):
         return {}
-    keys = (
-        "boundary", "title", "location", "salary", "employment_type",
-        "description", "apply_url",
-        "details_page_description_paths", "details_page_location_paths",
-        "list_url_pattern", "pagination",
-    )
+    keys = ("boundary", "title", "details_page_description_paths")
     out: dict = {}
     for k in keys:
         if k in w and w[k]:
             v = w[k]
-            if isinstance(v, str) and len(v) > 300:
-                v = v[:297] + "..."
+            if isinstance(v, str) and len(v) > 160:
+                v = v[:157] + "..."
             out[k] = v
     return out
 

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict f9eOVvf7YngcXk2zatzr3DHOEANhzc4grSdib87saIbn7xp1d2EtzXNHzhZ0lzm
+\restrict KqOg9IswEAkcp8BZCJbqlerDcbuPbukgS5aCcHBDhoGboiZQ9rkeS2fgdT7mGz1
 
 -- Dumped from database version 16.13
 -- Dumped by pg_dump version 16.13
@@ -218,6 +218,33 @@ CREATE TABLE public.app_users (
 
 
 --
+-- Name: ats_pattern_proposals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ats_pattern_proposals (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ats_name text NOT NULL,
+    source text DEFAULT 'llm'::text NOT NULL,
+    sample_url text,
+    url_patterns jsonb DEFAULT '[]'::jsonb NOT NULL,
+    html_patterns jsonb DEFAULT '[]'::jsonb NOT NULL,
+    selectors jsonb NOT NULL,
+    pagination jsonb,
+    confidence double precision,
+    status text DEFAULT 'proposed'::text NOT NULL,
+    shadow_match_count integer DEFAULT 0 NOT NULL,
+    shadow_failure_count integer DEFAULT 0 NOT NULL,
+    shadow_first_seen timestamp with time zone,
+    shadow_last_seen timestamp with time zone,
+    promoted_at timestamp with time zone,
+    rejected_at timestamp with time zone,
+    rejection_reason text,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: career_pages; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -371,6 +398,23 @@ CREATE TABLE public.crawler_test_data (
 
 
 --
+-- Name: drift_baselines; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.drift_baselines (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    model_name text NOT NULL,
+    feature_name text NOT NULL,
+    distribution jsonb NOT NULL,
+    window_start timestamp with time zone NOT NULL,
+    window_end timestamp with time zone NOT NULL,
+    sample_size integer NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    is_active boolean DEFAULT true NOT NULL
+);
+
+
+--
 -- Name: excluded_sites; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -385,6 +429,26 @@ CREATE TABLE public.excluded_sites (
     reason text,
     source_file text,
     created_at timestamp with time zone DEFAULT now()
+);
+
+
+--
+-- Name: experiments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.experiments (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    model_name text NOT NULL,
+    champion_version_id uuid,
+    challenger_version_id uuid,
+    holdout_set_id uuid NOT NULL,
+    strategy text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    promotion_decision jsonb,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -458,6 +522,97 @@ CREATE TABLE public.geocode_cache (
     created_at timestamp with time zone DEFAULT now(),
     last_used_at timestamp with time zone DEFAULT now(),
     use_count integer DEFAULT 1
+);
+
+
+--
+-- Name: gold_holdout_domains; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gold_holdout_domains (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    holdout_set_id uuid NOT NULL,
+    domain text NOT NULL,
+    advertiser_name text,
+    expected_job_count integer,
+    market_id text,
+    ats_platform text,
+    source_lead_import_id uuid,
+    verification_status text DEFAULT 'unverified'::text NOT NULL,
+    verified_at timestamp with time zone,
+    verified_by text
+);
+
+
+--
+-- Name: gold_holdout_jobs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gold_holdout_jobs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    holdout_domain_id uuid NOT NULL,
+    title text NOT NULL,
+    location text,
+    employment_type text,
+    apply_url text,
+    verified_at timestamp with time zone DEFAULT now() NOT NULL,
+    verified_by text,
+    notes text,
+    verification_status text DEFAULT 'unverified'::text NOT NULL,
+    source text DEFAULT 'manual'::text NOT NULL,
+    source_url text,
+    description_length integer
+);
+
+
+--
+-- Name: gold_holdout_sets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gold_holdout_sets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    description text,
+    source text DEFAULT 'lead_imports'::text NOT NULL,
+    market_id text,
+    is_frozen boolean DEFAULT false NOT NULL,
+    frozen_at timestamp with time zone,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: gold_holdout_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gold_holdout_snapshots (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    holdout_domain_id uuid NOT NULL,
+    url text NOT NULL,
+    snapshot_path text NOT NULL,
+    content_hash text NOT NULL,
+    content_type text,
+    http_status integer,
+    byte_size integer,
+    snapshotted_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: inference_metrics_hourly; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inference_metrics_hourly (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    model_version_id uuid NOT NULL,
+    hour_bucket timestamp with time zone NOT NULL,
+    sample_count integer NOT NULL,
+    latency_p50_ms double precision,
+    latency_p95_ms double precision,
+    latency_p99_ms double precision,
+    llm_escalation_count integer DEFAULT 0 NOT NULL,
+    error_count integer DEFAULT 0 NOT NULL
 );
 
 
@@ -651,6 +806,25 @@ CREATE TABLE public.markets (
 
 
 --
+-- Name: metric_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.metric_snapshots (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    model_version_id uuid NOT NULL,
+    holdout_set_id uuid NOT NULL,
+    experiment_id uuid,
+    stratum_key text DEFAULT 'all'::text NOT NULL,
+    metric_name text NOT NULL,
+    metric_value double precision NOT NULL,
+    sample_size integer NOT NULL,
+    ci_low double precision,
+    ci_high double precision,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: ml_model_test_runs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -705,6 +879,28 @@ CREATE TABLE public.ml_test_feedback (
     screenshot_path text,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now()
+);
+
+
+--
+-- Name: model_versions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.model_versions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    version integer NOT NULL,
+    algorithm text NOT NULL,
+    artifact_path text,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    feature_set jsonb DEFAULT '[]'::jsonb NOT NULL,
+    training_corpus_hash text,
+    parent_version_id uuid,
+    status text DEFAULT 'candidate'::text NOT NULL,
+    trained_at timestamp with time zone DEFAULT now() NOT NULL,
+    promoted_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    notes text
 );
 
 
@@ -847,6 +1043,14 @@ ALTER TABLE ONLY public.app_users
 
 
 --
+-- Name: ats_pattern_proposals ats_pattern_proposals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ats_pattern_proposals
+    ADD CONSTRAINT ats_pattern_proposals_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: career_pages career_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -911,6 +1115,22 @@ ALTER TABLE ONLY public.crawler_test_data
 
 
 --
+-- Name: drift_baselines drift_baselines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.drift_baselines
+    ADD CONSTRAINT drift_baselines_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: drift_baselines drift_baselines_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.drift_baselines
+    ADD CONSTRAINT drift_baselines_uk UNIQUE (model_name, feature_name, window_end);
+
+
+--
 -- Name: excluded_sites excluded_sites_domain_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -924,6 +1144,22 @@ ALTER TABLE ONLY public.excluded_sites
 
 ALTER TABLE ONLY public.excluded_sites
     ADD CONSTRAINT excluded_sites_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: experiments experiments_name_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.experiments
+    ADD CONSTRAINT experiments_name_uk UNIQUE (name);
+
+
+--
+-- Name: experiments experiments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.experiments
+    ADD CONSTRAINT experiments_pkey PRIMARY KEY (id);
 
 
 --
@@ -948,6 +1184,78 @@ ALTER TABLE ONLY public.geo_locations
 
 ALTER TABLE ONLY public.geocode_cache
     ADD CONSTRAINT geocode_cache_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gold_holdout_domains gold_holdout_domains_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_domains
+    ADD CONSTRAINT gold_holdout_domains_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gold_holdout_domains gold_holdout_domains_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_domains
+    ADD CONSTRAINT gold_holdout_domains_uk UNIQUE (holdout_set_id, domain);
+
+
+--
+-- Name: gold_holdout_jobs gold_holdout_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_jobs
+    ADD CONSTRAINT gold_holdout_jobs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gold_holdout_sets gold_holdout_sets_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_sets
+    ADD CONSTRAINT gold_holdout_sets_name_key UNIQUE (name);
+
+
+--
+-- Name: gold_holdout_sets gold_holdout_sets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_sets
+    ADD CONSTRAINT gold_holdout_sets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gold_holdout_snapshots gold_holdout_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_snapshots
+    ADD CONSTRAINT gold_holdout_snapshots_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gold_holdout_snapshots gold_holdout_snapshots_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_snapshots
+    ADD CONSTRAINT gold_holdout_snapshots_uk UNIQUE (holdout_domain_id, content_hash);
+
+
+--
+-- Name: inference_metrics_hourly inference_metrics_hourly_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inference_metrics_hourly
+    ADD CONSTRAINT inference_metrics_hourly_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inference_metrics_hourly inference_metrics_hourly_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inference_metrics_hourly
+    ADD CONSTRAINT inference_metrics_hourly_uk UNIQUE (model_version_id, hour_bucket);
 
 
 --
@@ -1007,6 +1315,22 @@ ALTER TABLE ONLY public.markets
 
 
 --
+-- Name: metric_snapshots metric_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metric_snapshots
+    ADD CONSTRAINT metric_snapshots_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: metric_snapshots metric_snapshots_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metric_snapshots
+    ADD CONSTRAINT metric_snapshots_uk UNIQUE (model_version_id, holdout_set_id, stratum_key, metric_name, computed_at);
+
+
+--
 -- Name: ml_model_test_runs ml_model_test_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1028,6 +1352,22 @@ ALTER TABLE ONLY public.ml_models
 
 ALTER TABLE ONLY public.ml_test_feedback
     ADD CONSTRAINT ml_test_feedback_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: model_versions model_versions_name_version_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.model_versions
+    ADD CONSTRAINT model_versions_name_version_uk UNIQUE (name, version);
+
+
+--
+-- Name: model_versions model_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.model_versions
+    ADD CONSTRAINT model_versions_pkey PRIMARY KEY (id);
 
 
 --
@@ -1207,6 +1547,13 @@ CREATE INDEX idx_ml_test_feedback_site ON public.ml_test_feedback USING btree (t
 
 
 --
+-- Name: ix_ats_pattern_proposals_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_ats_pattern_proposals_status ON public.ats_pattern_proposals USING btree (status, ats_name);
+
+
+--
 -- Name: ix_career_pages_active_created; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1354,10 +1701,66 @@ CREATE INDEX ix_crawler_test_data_external_id ON public.crawler_test_data USING 
 
 
 --
+-- Name: ix_drift_baselines_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_drift_baselines_active ON public.drift_baselines USING btree (model_name, feature_name) WHERE (is_active = true);
+
+
+--
 -- Name: ix_excluded_sites_domain; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_excluded_sites_domain ON public.excluded_sites USING btree (domain);
+
+
+--
+-- Name: ix_experiments_model_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_experiments_model_status ON public.experiments USING btree (model_name, status);
+
+
+--
+-- Name: ix_gold_holdout_domains_ats_market; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_gold_holdout_domains_ats_market ON public.gold_holdout_domains USING btree (ats_platform, market_id);
+
+
+--
+-- Name: ix_gold_holdout_domains_set; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_gold_holdout_domains_set ON public.gold_holdout_domains USING btree (holdout_set_id);
+
+
+--
+-- Name: ix_gold_holdout_jobs_domain; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_gold_holdout_jobs_domain ON public.gold_holdout_jobs USING btree (holdout_domain_id);
+
+
+--
+-- Name: ix_gold_holdout_jobs_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_gold_holdout_jobs_source ON public.gold_holdout_jobs USING btree (source);
+
+
+--
+-- Name: ix_gold_holdout_jobs_verification_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_gold_holdout_jobs_verification_status ON public.gold_holdout_jobs USING btree (verification_status);
+
+
+--
+-- Name: ix_inference_metrics_hourly_bucket; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_inference_metrics_hourly_bucket ON public.inference_metrics_hourly USING btree (model_version_id, hour_bucket DESC);
 
 
 --
@@ -1543,10 +1946,38 @@ CREATE INDEX ix_lead_imports_status ON public.lead_imports USING btree (status);
 
 
 --
+-- Name: ix_metric_snapshots_experiment; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_metric_snapshots_experiment ON public.metric_snapshots USING btree (experiment_id);
+
+
+--
+-- Name: ix_metric_snapshots_model; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_metric_snapshots_model ON public.metric_snapshots USING btree (model_version_id, computed_at DESC);
+
+
+--
 -- Name: ix_ml_model_test_runs_model_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_ml_model_test_runs_model_id ON public.ml_model_test_runs USING btree (model_id);
+
+
+--
+-- Name: ix_model_versions_name_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_model_versions_name_status ON public.model_versions USING btree (name, status);
+
+
+--
+-- Name: ix_model_versions_one_champion_per_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ix_model_versions_one_champion_per_name ON public.model_versions USING btree (name) WHERE (status = 'champion'::text);
 
 
 --
@@ -1677,6 +2108,30 @@ ALTER TABLE ONLY public.crawl_logs
 
 
 --
+-- Name: experiments experiments_challenger_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.experiments
+    ADD CONSTRAINT experiments_challenger_version_id_fkey FOREIGN KEY (challenger_version_id) REFERENCES public.model_versions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: experiments experiments_champion_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.experiments
+    ADD CONSTRAINT experiments_champion_version_id_fkey FOREIGN KEY (champion_version_id) REFERENCES public.model_versions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: experiments experiments_holdout_set_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.experiments
+    ADD CONSTRAINT experiments_holdout_set_id_fkey FOREIGN KEY (holdout_set_id) REFERENCES public.gold_holdout_sets(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: extraction_comparisons extraction_comparisons_career_page_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1714,6 +2169,46 @@ ALTER TABLE ONLY public.geo_locations
 
 ALTER TABLE ONLY public.geocode_cache
     ADD CONSTRAINT geocode_cache_geo_location_id_fkey FOREIGN KEY (geo_location_id) REFERENCES public.geo_locations(id);
+
+
+--
+-- Name: gold_holdout_domains gold_holdout_domains_holdout_set_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_domains
+    ADD CONSTRAINT gold_holdout_domains_holdout_set_id_fkey FOREIGN KEY (holdout_set_id) REFERENCES public.gold_holdout_sets(id) ON DELETE CASCADE;
+
+
+--
+-- Name: gold_holdout_domains gold_holdout_domains_source_lead_import_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_domains
+    ADD CONSTRAINT gold_holdout_domains_source_lead_import_id_fkey FOREIGN KEY (source_lead_import_id) REFERENCES public.lead_imports(id) ON DELETE SET NULL;
+
+
+--
+-- Name: gold_holdout_jobs gold_holdout_jobs_holdout_domain_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_jobs
+    ADD CONSTRAINT gold_holdout_jobs_holdout_domain_id_fkey FOREIGN KEY (holdout_domain_id) REFERENCES public.gold_holdout_domains(id) ON DELETE CASCADE;
+
+
+--
+-- Name: gold_holdout_snapshots gold_holdout_snapshots_holdout_domain_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gold_holdout_snapshots
+    ADD CONSTRAINT gold_holdout_snapshots_holdout_domain_id_fkey FOREIGN KEY (holdout_domain_id) REFERENCES public.gold_holdout_domains(id) ON DELETE CASCADE;
+
+
+--
+-- Name: inference_metrics_hourly inference_metrics_hourly_model_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inference_metrics_hourly
+    ADD CONSTRAINT inference_metrics_hourly_model_version_id_fkey FOREIGN KEY (model_version_id) REFERENCES public.model_versions(id) ON DELETE CASCADE;
 
 
 --
@@ -1773,6 +2268,30 @@ ALTER TABLE ONLY public.lead_imports
 
 
 --
+-- Name: metric_snapshots metric_snapshots_experiment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metric_snapshots
+    ADD CONSTRAINT metric_snapshots_experiment_id_fkey FOREIGN KEY (experiment_id) REFERENCES public.experiments(id) ON DELETE SET NULL;
+
+
+--
+-- Name: metric_snapshots metric_snapshots_holdout_set_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metric_snapshots
+    ADD CONSTRAINT metric_snapshots_holdout_set_id_fkey FOREIGN KEY (holdout_set_id) REFERENCES public.gold_holdout_sets(id) ON DELETE CASCADE;
+
+
+--
+-- Name: metric_snapshots metric_snapshots_model_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metric_snapshots
+    ADD CONSTRAINT metric_snapshots_model_version_id_fkey FOREIGN KEY (model_version_id) REFERENCES public.model_versions(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ml_model_test_runs ml_model_test_runs_model_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1786,6 +2305,14 @@ ALTER TABLE ONLY public.ml_model_test_runs
 
 ALTER TABLE ONLY public.ml_test_feedback
     ADD CONSTRAINT ml_test_feedback_test_run_id_fkey FOREIGN KEY (test_run_id) REFERENCES public.ml_model_test_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: model_versions model_versions_parent_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.model_versions
+    ADD CONSTRAINT model_versions_parent_version_id_fkey FOREIGN KEY (parent_version_id) REFERENCES public.model_versions(id) ON DELETE SET NULL;
 
 
 --
@@ -1824,5 +2351,5 @@ ALTER TABLE ONLY public.site_templates
 -- PostgreSQL database dump complete
 --
 
-\unrestrict f9eOVvf7YngcXk2zatzr3DHOEANhzc4grSdib87saIbn7xp1d2EtzXNHzhZ0lzm
+\unrestrict KqOg9IswEAkcp8BZCJbqlerDcbuPbukgS5aCcHBDhoGboiZQ9rkeS2fgdT7mGz1
 

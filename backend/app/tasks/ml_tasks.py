@@ -529,19 +529,19 @@ def _pick_extractor(name: str):
 
 
 def _pick_finder(name: str):
-    """Select career page finder class by model name. Dynamic import."""
+    """Select career page finder class by model name. Dynamic import.
+
+    Only the actively-maintained finders remain after the 2026-04-14 reset:
+    v4 (legacy), v26 (stable), v60 (consolidated), v69 (paired with champion).
+    Any model version not in the map falls through to the base CareerPageFinder.
+    """
     import importlib, re
     _FINDER_MAP = {
-        100: 82,  # v10.0 — LLM extractor, uses v82 finder (best discovery)
-        91: 91,
-        90: 90,
-        89: 89,
-        88: 88,
-        87: 87,
-        86: 86, 85: 85, 84: 84, 83: 83, 82: 82, 81: 81, 80: 80, 79: 79, 78: 78, 77: 77, 76: 76,
-        75: 75, 74: 74, 73: 73, 72: 72, 71: 71, 70: 70, 69: 69,
-        68: 68, 67: 67, 66: 66, 65: 65, 64: 64, 63: 63, 62: 62,
-        61: 61, 60: 60, 20: 20, 17: 5, 16: 4, 15: 3, 14: 2, 13: 2, 12: 2,
+        69: 69,  # v6.9 champion
+        60: 60,  # v6.0 consolidated
+        26: 26,  # v2.6 stable
+        20: 20,  # v2.0 → keep for legacy tests
+        17: 5, 16: 4, 15: 3, 14: 2, 13: 2, 12: 2,
     }
     match = re.search(r"v(\d+)\.(\d+)", name)
     if match:
@@ -786,36 +786,52 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
                                 continue
                         return None
 
-                    for job in baseline_jobs[:10]:  # Cap at 10 for speed
+                    # Fetch + enrich up to 10 detail pages concurrently. The
+                    # sequential loop used to dominate per-site wall-clock on
+                    # detail-heavy sites (10 × ~3 s = ~30 s added). Semaphore
+                    # caps concurrent fetches at 6 per site to stay polite.
+                    candidates = []
+                    for job in baseline_jobs[:10]:
                         detail_url = job.get("source_url", "")
                         if not detail_url or detail_url == url:
                             continue
                         needs_loc = not job.get("location_raw")
-                        needs_desc = not job.get("description") or len(job.get("description", "")) < 50
-                        if not needs_loc and not needs_desc:
-                            continue
-                        try:
-                            dr = await client.get(detail_url, timeout=8)
-                            if dr.status_code != 200 or len(dr.text) < 200:
-                                continue
-                            if needs_desc and detail_desc_sels:
-                                desc = _try_detail(dr.text, detail_desc_sels)
-                                if desc and len(desc) > 50:
-                                    job["description"] = desc[:5000]
-                            if needs_loc and detail_loc_sels:
-                                loc = _try_detail(dr.text, detail_loc_sels)
-                                if loc and 1 < len(loc) < 200:
-                                    job["location_raw"] = loc
-                            if detail_salary_sel and not job.get("salary_raw"):
-                                sal = _try_detail(dr.text, _parse(detail_salary_sel))
-                                if sal:
-                                    job["salary_raw"] = sal
-                            if detail_type_sels and not job.get("employment_type"):
-                                jtype = _try_detail(dr.text, detail_type_sels)
-                                if jtype:
-                                    job["employment_type"] = jtype
-                        except Exception:
-                            continue
+                        needs_desc = (not job.get("description")
+                                      or len(job.get("description", "")) < 50)
+                        if needs_loc or needs_desc:
+                            candidates.append((job, detail_url, needs_loc, needs_desc))
+
+                    if candidates:
+                        _sem = asyncio.Semaphore(6)
+                        async def _enrich_one(job, detail_url, needs_loc, needs_desc):
+                            async with _sem:
+                                try:
+                                    dr = await client.get(detail_url, timeout=8)
+                                except Exception:
+                                    return
+                                if dr.status_code != 200 or len(dr.text) < 200:
+                                    return
+                                if needs_desc and detail_desc_sels:
+                                    desc = _try_detail(dr.text, detail_desc_sels)
+                                    if desc and len(desc) > 50:
+                                        job["description"] = desc[:5000]
+                                if needs_loc and detail_loc_sels:
+                                    loc = _try_detail(dr.text, detail_loc_sels)
+                                    if loc and 1 < len(loc) < 200:
+                                        job["location_raw"] = loc
+                                if detail_salary_sel and not job.get("salary_raw"):
+                                    sal = _try_detail(dr.text, _parse(detail_salary_sel))
+                                    if sal:
+                                        job["salary_raw"] = sal
+                                if detail_type_sels and not job.get("employment_type"):
+                                    jtype = _try_detail(dr.text, detail_type_sels)
+                                    if jtype:
+                                        job["employment_type"] = jtype
+
+                        await asyncio.gather(
+                            *(_enrich_one(*c) for c in candidates),
+                            return_exceptions=True,
+                        )
 
                 entry["baseline"]["jobs"] = len(baseline_jobs)
                 entry["baseline"]["fields"] = _field_coverage(baseline_jobs)
@@ -835,14 +851,47 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
 
         # ── Helper: run discovery + extraction for a model ──
         async def _run_model_phase(ext, finder_cls, phase_dict):
-            finder = finder_cls(timeout=6)
-            if hasattr(finder, 'set_hint'):
-                finder.set_hint(url)
-            disc = {"url": None, "method": "not_run", "html": None}
-            try:
-                disc = await finder.find(domain, company_name)
-            except Exception as e:
-                disc = {"url": None, "method": f"error:{str(e)[:40]}", "html": None}
+            # Run-scoped discovery cache: when champion and challenger use the
+            # SAME finder class, the second phase reuses the first phase's URL
+            # + HTML instead of re-probing. Saves 3–5 HTTP fetches per site ×
+            # 179 sites × 2 phases = ~600 fetches per A/B run. Keyed on
+            # (run_id, domain, finder_class) so finder upgrades still re-probe.
+            finder_key = getattr(finder_cls, "__name__", "unknown")
+            _disc_cache_key = f"career_disc:{run_id}:{domain}:{finder_key}" if run_id else None
+            _cached_disc = None
+            if _disc_cache_key:
+                try:
+                    raw = _r.get(_disc_cache_key)
+                    if raw:
+                        _cached_disc = _json.loads(raw)
+                except Exception:
+                    pass
+
+            if _cached_disc:
+                disc = {
+                    "url": _cached_disc.get("url"),
+                    "method": (_cached_disc.get("method") or "") + "+cached",
+                    "html": _cached_disc.get("html"),
+                }
+            else:
+                finder = finder_cls(timeout=6)
+                if hasattr(finder, 'set_hint'):
+                    finder.set_hint(url)
+                disc = {"url": None, "method": "not_run", "html": None}
+                try:
+                    disc = await finder.find(domain, company_name)
+                except Exception as e:
+                    disc = {"url": None, "method": f"error:{str(e)[:40]}", "html": None}
+                # Cache only successful discoveries; 1h TTL is plenty for a single run
+                if _disc_cache_key and disc.get("url") and disc.get("html"):
+                    try:
+                        _r.setex(_disc_cache_key, 3600, _json.dumps({
+                            "url": disc["url"],
+                            "method": disc.get("method"),
+                            "html": disc["html"],
+                        }, default=str))
+                    except Exception:
+                        pass
 
             f_url, f_html = disc["url"], disc["html"]
             phase_dict["url_found"] = f_url

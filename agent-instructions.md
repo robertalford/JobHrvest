@@ -163,61 +163,132 @@ Only skip tests for: pure copy/content changes, trivial config changes, or produ
 
 ---
 
-## ML Model Auto-Improve System
+## Site Config — Champion/Challenger Model & Auto-Improve
 
-### Architecture
+The **Site Config** section of the app (`/site-config/*`) is the home of the champion/challenger loop that learns, per-domain, how to discover the career page and extract structured job listings. The other two sections (Extraction, Domain Discovery) consume the site configs Site Config produces and are feature-flagged off until the model is performant.
 
-The job extraction system uses a champion/challenger model:
+### Two-Model Pipeline
 
-- **Career Page Finder** (`CareerPageFinderVXX`): Discovers career page URLs from a domain
-- **Tiered Extractor** (`TieredExtractorVXX`): Extracts structured jobs from HTML
+| Model | Purpose | Latest iteration files |
+|-------|---------|------------------------|
+| **Career Page Finder** (`CareerPageFinderVXX`) | Given a domain + company name, find the career/jobs listing URL | `career_page_finder_v6X.py` / `v7X.py` / … |
+| **Tiered Extractor** (`TieredExtractorVXX`) | Given a career page URL + HTML, extract structured job listings (title, source_url, location, salary, employment_type, description) | `tiered_extractor_v6X.py` / `v7X.py` / … |
 
-Current live champion is tracked in DB (`SELECT name FROM ml_models WHERE status = 'live'`). Latest iteration files are the highest-numbered `v6X` files.
+Both use a priority cascade: parent v1.6 heuristic → structured data (JSON-LD, `__NEXT_DATA__`) → dedicated ATS extractors → DOM fallbacks.
 
-### Key Files
-- `tiered_extractor_v16.py` — Stable base. DO NOT MODIFY.
-- `tiered_extractor_v60.py` — v6.0 consolidated reference. DO NOT MODIFY.
-- `tiered_extractor_v6X.py` — Latest iteration (highest number is current)
-- `career_page_finder_v26.py` — Proven discovery. DO NOT MODIFY.
-- `career_page_finder_v60.py` — v6.0 consolidated finder
-- `career_page_finder_v6X.py` — Latest finder iteration
-- `storage/auto_improve_memory.json` — Iteration history and learnings (READ before, UPDATE after)
-- `new-prompt.md` — Auto-improve agent prompt (for Codex/Claude Agent SDK)
+### Current Champion (2026-04-14)
 
-### Quality Standards
+- **Live champion:** `v6.9` (`tiered_extractor_v69.py` + `career_page_finder_v69.py`)
+- **Objective composite score:** `85.4 / 100` (best across the full history when re-scored with the capped objective formula)
+- **Breakdown:** discovery 100 · quality extraction 100 · volume accuracy 96.2 · field completeness 45.3
+- **Benchmark run:** 179 sites (129 fixed regression + 50 exploration), test run id `c1f3caac-ff49-44ea-bd51-b477b40a9d8b`
+- **Why v6.9, not a later version:** many later iterations (v6.1, v6.2, v7.2, etc.) posted higher *raw* composite scores only because of counting artefacts (e.g. `field_completeness` > 100 from multi-valued field extraction). When each axis is capped at the objective ceiling of 100, v6.9 is the clear winner — and with quality_extraction = 100 and volume_accuracy = 96.2 it achieves that with genuine breadth, not by over-emitting.
+
+The Models page was cleared on 2026-04-14 and v6.9 re-instated as the sole live champion so the next improvement run starts from the objectively best baseline we have data for.
+
+### Objective Quality Criteria (the Composite Score)
+
+**This is the single yardstick for promotion.** All four axes are in [0, 100] and the composite is a weighted average (see [`backend/app/api/v1/endpoints/ml_models.py`](backend/app/api/v1/endpoints/ml_models.py#L792) `_composite_score_standalone`):
+
+| Axis | Weight | What it measures | Objective ceiling |
+|------|--------|------------------|------------------|
+| **Discovery Rate** | 20% | % of sites where the career page URL was found | 100% |
+| **Quality Extraction Rate** | 30% | % of sites with real jobs extracted, minus any with a `quality_warning` — **penalises Type 1 false positives** | 100% |
+| **Field Completeness** | 25% | Average fields populated per job, out of 6 (title, source_url, location_raw, salary_raw, employment_type, description) | 100% — any value above 100 is an extraction bug, not an improvement |
+| **Volume Accuracy** | 25% | How closely model job count matches the Jobstream baseline — symmetric penalty for both under- and over-extraction (peak at ratio 1.0; penalty starts once ratio > 1.5) | 100% |
+
+**Composite = 0.20·Discovery + 0.30·QualityExtraction + 0.25·FieldCompleteness + 0.25·VolumeAccuracy**
+
+**Promotion gate** (enforced in `backend/app/tasks/ml_tasks.py`):
+- Challenger composite > 0
+- Challenger composite > champion composite (capped objective score)
+- Regression accuracy ≥ 60% on the fixed regression subset
+- **Zero regressions** — challenger must not miss any site the champion passed
+- If all four pass → challenger promoted to `status='live'`, old champion demoted to `tested`
+
+When auditing historical runs or comparing candidates, **always cap each axis at 100 before computing the composite**. Raw values above 100 indicate over-counting and should not be rewarded.
+
+### Champion/Challenger Infrastructure (landed 2026-04-14)
+
+Beyond the per-iteration A/B test above, the full champion/challenger hardening lives under [`backend/app/ml/champion_challenger/`](backend/app/ml/champion_challenger/):
+
+- **`registry.py`** — thin async helpers around `model_versions`; partial unique index `ix_model_versions_one_champion_per_name` enforces **one live champion per model_name** at DB level.
+- **`domain_splitter.py`** — hard guard: domains never cross train/val/test. Compound-TLD aware (`.com.au`, `.co.uk`, `.co.nz`, `.com.sg`). `assert_holdout_isolation` is called at the start of every training run.
+- **`promotion.py`** — bootstrap CIs, exact-binomial McNemar for small-sample significance, multi-metric promotion gate. Default: ≥2 of {f1, recall, job_coverage_rate, false_positive_rate↓} must improve, McNemar p<0.05, latency p95 within budget. **A single-metric win never promotes.**
+- **`drift_monitor.py`** — PSI on numeric (quantile-binned) and categorical features. PSI ≥ 0.25 = significant; retraining is gated on drift, not calendar.
+- **`failure_analysis.py`** — **local Ollama** (`OLLAMA_MODEL`), NOT the Claude API — keeps the loop offline-capable and zero-cost per iteration.
+- **`uncertainty.py`** — margin-based + stratified active sampling so the review queue isn't dominated by one ATS/market.
+- **`ats_quarantine.py`** — LLM-suggested ATS selectors go `proposed → shadow → active`, never straight to production. Strict defaults: ≥25 matches, ≤10% failure rate, ≥24h observation window.
+- **`latency_budget.py`** — Redis ZSET of per-inference observations; p50/p95/p99 rollups → `inference_metrics_hourly`. Default per-page p95 budget = 200 ms.
+- **`holdout_builder.py`** / **`holdout_evaluator.py`** — frozen GOLD holdout sourced from `lead_imports`, stratified by ATS and market, rapidfuzz title matching with substring fallback, bootstrap CI on F1.
+- **`orchestrator.py`** — `ChampionChallengerOrchestrator.run_experiment` ties registry → evaluator → McNemar → multi-metric gates → latency budget → atomic promotion (old champion retired + new crowned in one tx).
+
+DB tables: `model_versions`, `gold_holdout_{sets,domains,snapshots,jobs}`, `experiments`, `metric_snapshots`, `ats_pattern_proposals`, `drift_baselines`, `inference_metrics_hourly` (migration `0026_champion_challenger_infra`).
+
+**Why the existing TF-IDF classifier's F1=0.9963 is misleading:** its training labels are derived from `quality_score`, which is itself a rule set. The model is mimicking the rules, not learning ground truth. Treat it as an unverified baseline until re-evaluated against the GOLD holdout.
+
+### The Improvement-Run Loop (what happens per iteration)
+
+1. **A/B test the current champion** on the fixed regression suite (129 sites) + 50 exploration sites. Three phases per site:
+   - **Baseline** — Jobstream hand-tuned selectors (the ceiling)
+   - **Champion** — current live model extracts blindly
+   - **Challenger** — candidate model extracts blindly
+2. **Score each phase** with the 4-axis composite (capped) above.
+3. **Codex auto-improve** reads failure patterns from the test run + `storage/auto_improve_memory.json` and generates the next `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` iteration. Runs as a host-side daemon (triggered via `/storage/auto_improve_triggers/<model_id>.trigger` files; host-only because `codex` must run outside the container).
+4. **Register** the new version in `ml_models` and wire it into `_FINDER_MAP` in both [`ml_models.py`](backend/app/api/v1/endpoints/ml_models.py) and [`ml_tasks.py`](backend/app/tasks/ml_tasks.py).
+5. **Execute A/B test** → if the promotion gate passes, the challenger is atomically promoted to `live` and the next iteration repeats from step 1 with the new champion as the source. If it fails, the challenger is kept as `tested` and a new improvement run is spawned from the same champion.
+6. **Standalone mode:** the same champion can be run against a user-uploaded CSV of domains via the **Bulk Domain Processor** (`/site-config/bulk-process`) — upload CSV → get CSV back with `selector_*` columns filled when `extraction_confidence ≥ threshold` (default 0.8).
+
+### Auto-Improve Agent Rules (Codex / Claude Agent SDK)
+
+When acting as the auto-improve agent, follow [`new-prompt.md`](new-prompt.md) and:
+
+- **Always read `storage/auto_improve_memory.json` BEFORE designing, UPDATE it after implementing.**
+- **Query the live champion dynamically** — do NOT hardcode version numbers. `SELECT name FROM ml_models WHERE status = 'live' AND model_type = 'tiered_extractor'`, then `ls -t backend/app/crawlers/tiered_extractor_v*.py | head -1`.
+- **Inherit from the stable base only** — `TieredExtractorV16` (extractors) and `CareerPageFinderV26` (finders). NEVER build inheritance chains deeper than 1 level (your v → stable base, full stop).
+- **NEVER add single-site fixes** — every change must help 3+ sites. Prefer platform-level fixes (e.g. a new Workday handler) over pattern-level fixes (e.g. a CSS selector for one site).
+- **Quality over quantity** — 10 real jobs > 50 fake ones. Type 1 false positives are critical.
+- **Don't weaken title/jobset validation** to fix false negatives — it always creates more false positives than it fixes.
+- **Keep total added lines under 200 per iteration.** If you need more, your approach is too complex.
+
+### Quality Standards for a Valid Job
 
 A valid extracted job MUST have:
-1. **Real job title** — NOT a nav label, section heading, department name, or CMS artifact
-2. **Unique detail URL** — NOT the listing page itself
-3. **Core fields from actual page data** (never inferred): title, source_url, location_raw, description
-4. **Type 1 errors (false positives) are CRITICAL** — quality over quantity, always
+1. **Real job title** — NOT a nav label, section heading, department name, or CMS artifact.
+2. **Unique detail URL** — NOT the listing page itself.
+3. **Core fields from actual page data** (never inferred): title, source_url, location_raw, description.
+4. **Clean description text** — no `\t`/`\n` clutter, HTML entities, or boilerplate (see "Description Quality" in `new-prompt.md`). Type-4 errors degrade downstream use.
 
-### Historical Accuracy
+### Key Files
+
+- [`tiered_extractor_v16.py`](backend/app/crawlers/tiered_extractor_v16.py) — stable base. **DO NOT MODIFY.**
+- [`tiered_extractor_v60.py`](backend/app/crawlers/tiered_extractor_v60.py) — v6.0 consolidated reference. **DO NOT MODIFY.**
+- [`tiered_extractor_v69.py`](backend/app/crawlers/tiered_extractor_v69.py) — **current live champion.**
+- [`tiered_extractor_vXX.py`](backend/app/crawlers/) — challenger iterations (highest-numbered file ≠ champion; champion is whichever has `status='live'` in DB).
+- [`career_page_finder_v26.py`](backend/app/crawlers/career_page_finder_v26.py) — proven discovery. **DO NOT MODIFY.**
+- [`career_page_finder_v69.py`](backend/app/crawlers/career_page_finder_v69.py) — finder paired with the current champion.
+- [`storage/auto_improve_memory.json`](storage/auto_improve_memory.json) — iteration history + anti-patterns (READ before, UPDATE after).
+- [`new-prompt.md`](new-prompt.md) — auto-improve agent prompt.
+- [`backend/app/ml/champion_challenger/`](backend/app/ml/champion_challenger/) — registry, promotion, drift, ATS quarantine, latency, orchestrator (hardened loop).
+- [`backend/scripts/build_gold_holdout.py`](backend/scripts/build_gold_holdout.py) — materialise a frozen GOLD holdout from `lead_imports`.
+
+### Pre-Flight Checklist (before producing the next challenger)
+
+1. Migration `0026_champion_challenger_infra` applied (`alembic upgrade head`).
+2. GOLD holdout materialised: `python -m scripts.build_gold_holdout --name au_baseline_v1 --market AU --max-domains 100`.
+3. Manually verify `gold_holdout_jobs` (one-time human-in-the-loop labelling).
+4. Re-evaluate the existing TF-IDF classifier against the GOLD holdout to establish the *true* baseline.
+5. Register v6.9 in `model_versions` via `registry.register_model_version` then `registry.crown_initial_champion` (so the hardened orchestrator sees the same champion the Models page does).
+6. Only then start producing challengers and running `ChampionChallengerOrchestrator.run_experiment`.
+
+### Historical Note (pre-v6.9 iterations, for context only)
+
 - v1.6: 66% (376 lines) — baseline
 - v2.6: 82% (1,102 lines) — peak before consolidation
-- v3.7-v5.2: 50-68% (3,000+ lines) — regression from complexity
-- v6.0: 80% raw / 85.7% quality-adjusted (900 lines) — current best
-- v7.0: 32% — major regression from permissive linked-card title fallback; avoid broad short-title allowances tied only to URL shape
-- v7.1: precision reset + platform extractors (SuccessFactors table, Homerun state) to recover coverage without widening Type-1 risk
-- v7.4: added focused ATS/feed recovery (PageUp listing rows + pagination, Recruitee `/o/` paths, `jobs.json` shell feeds) while tightening login-label Type-1 rejection
-- v9.0: added bounded progressive pagination sequencing (fills sparse `?pp`/`/page/` gaps), multilingual AWSM title recovery, and linked-card editorial-label rejection (`Career Guide`) with compact role recovery
-- v10.2: improved local deterministic extraction quality in v100 via split-table CTA-row recovery, numeric query-id detail URL handling, and Unicode-safe multilingual title validation (benchmark rerun pending)
-- v10.3: preserved JSON state scripts in v100 truncation (`application/json`, `__NEXT_DATA__`) and added metadata-rich local extraction for list-group/span-card/split-heading-CTA layouts to improve field completeness on recoverable static pages
-
----
-
-## Codex / Auto-Improve Agent Instructions
-
-When running as an auto-improve agent (Codex or Claude Agent SDK), refer to:
-- `new-prompt.md` — The detailed prompt for the auto-improvement loop
-- `storage/auto_improve_memory.json` — Must be read before and updated after each iteration
-
-### Key Rules for Auto-Improve
-- **NEVER add single-site fixes** — every change must help 3+ sites
-- **Inherit from TieredExtractorV16** (extractors) and **CareerPageFinderV26** (finders)
-- **NEVER build inheritance chains deeper than 1 level**
-- **Quality over quantity** — 10 real jobs > 50 fake ones
-- **Prefer dedicated ATS extractors** over heuristic fallback chains
+- v3.7–v5.2: 50–68% (3,000+ lines) — regression from complexity
+- v6.0: 80% raw / 85.7% quality-adjusted (900 lines) — earlier "current best"
+- **v6.9: objective composite 85.4 — crowned champion 2026-04-14**
+- v7.0–v10.5: many iterations posted apparent gains but either regressed on the capped composite or inflated `field_completeness` beyond the 100 ceiling. History cleared from Models page on 2026-04-14; all post-v6.9 work starts fresh from v6.9.
 
 ---
 

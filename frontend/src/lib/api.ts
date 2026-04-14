@@ -219,6 +219,52 @@ export const getTestDataSiteWrappers = (page = 1, page_size = 50) =>
 export const importTestData = () =>
   api.post('/test-data/import').then(r => r.data);
 
+// GOLD Holdout (champion/challenger evaluation sets)
+export interface GoldHoldoutStats {
+  domains: number;
+  snapshots: number;
+  verified_domains: number;
+  ground_truth_jobs: number;
+}
+export interface GoldHoldoutSet {
+  id: string;
+  name: string;
+  description: string | null;
+  source: string;
+  market_id: string | null;
+  is_frozen: boolean;
+  is_active: boolean;
+  frozen_at: string | null;
+  created_at: string | null;
+  stats: GoldHoldoutStats;
+}
+export interface GoldHoldoutDomain {
+  id: string;
+  domain: string;
+  advertiser_name: string | null;
+  expected_job_count: number | null;
+  market_id: string | null;
+  ats_platform: string | null;
+  verification_status: string;
+  verified_at: string | null;
+  verified_by: string | null;
+  snapshot_count: number;
+  ground_truth_job_count: number;
+}
+export const getGoldHoldoutSets = () =>
+  api.get('/gold-holdout/sets').then(r => r.data as { sets: GoldHoldoutSet[] });
+export const getGoldHoldoutDomains = (
+  setId: string,
+  params?: { page?: number; page_size?: number; search?: string; verified_only?: boolean },
+) =>
+  api.get(`/gold-holdout/sets/${setId}/domains`, { params }).then(r => r.data as {
+    set: { id: string; name: string; description: string | null; market_id: string | null; is_frozen: boolean; frozen_at: string | null };
+    items: GoldHoldoutDomain[];
+    total: number;
+    page: number;
+    page_size: number;
+  });
+
 // ML Models
 export const getMLModels = (params?: Record<string, unknown>) =>
   api.get('/ml-models/', { params }).then(r => r.data);

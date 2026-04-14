@@ -34,28 +34,116 @@ PASSWORD = os.environ.get("JH_PASSWORD", "Uu00dyandben!")
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.3-codex")
 SAMPLE_SIZE = 40  # 20 regression (from prev run) + 20 new sites
-MAX_FAILURES_IN_PROMPT = 8  # Limit failures in prompt to avoid token overflow
-MAX_HTML_SNIPPET = 1500  # Max chars of HTML per failure (was 3000, too large)
+MAX_FAILURES_IN_PROMPT = 4  # one representative per top ATS cluster (brief clusters do the ranking)
+MAX_GAPS_IN_PROMPT = 4       # same — post-2026-04-14 compression target
+MAX_HTML_SNIPPET = 1500  # Max chars of HTML per failure
 MAX_DETAIL_HTML_SNIPPET = 3000  # detail pages are denser and deserve more budget
-PROMPT_MAX_BYTES = 28 * 1024  # 28KB ceiling — keeps Codex context coherent
+PROMPT_MAX_BYTES = 16 * 1024  # 16 KB ceiling — down from 28 KB (dynamic head + compact brief = more signal, fewer tokens)
 # Multi-candidate generation: how many parallel Codex runs per cycle. Each
-# runs with a distinct FOCUS DIRECTIVE; the best by fixture composite wins.
-# Defaults to 1 (current behaviour). Bump to 3 only after the fixture harness
-# has enough silver labels to differentiate candidates meaningfully.
-AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "1"))
+# runs with a distinct FOCUS DIRECTIVE (see DEFAULT_FOCUS_DIRECTIVES); the best
+# by fixture composite wins. Default 3 post-2026-04-14 reset because we now
+# have the fixture harness + silver labels to differentiate candidates.
+AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "3"))
 
-# Focus directives used by multi-candidate mode. Order matters — the first one
-# is always used when N=1, so keep it the most broadly-applicable.
+# Focus directives — one per axis. Position matters: index 0 is the default
+# for single-candidate mode, so keep it pointed at the weakest axis of the
+# current champion. v6.9's axes at reset: discovery 100 · quality 100 ·
+# volume 96.2 · field-completeness 45.3 → field-completeness is the dragging
+# axis, so that is candidate 0. Quality/volume candidates exist mostly to
+# catch regressions on the strong axes.
 DEFAULT_FOCUS_DIRECTIVES = (
-    "Fix the biggest ATS cluster in the next-iteration brief. Address it with "
-    "a single platform-level handler that generalises across 3+ failing sites.",
-    "Focus on detail-page enrichment for jobs whose listing-description is "
-    "short. Prefer to extend the base enrichment rather than add site-specific "
-    "selectors. Target the `field_completeness` axis.",
-    "Simplify. Remove dead code or over-specific patterns introduced in the "
-    "last 3 iterations. Keep all current regression wins; surface where "
-    "recent complexity no longer pays for itself.",
+    "Axis: FIELD_COMPLETENESS. The dragging axis — jobs found but missing "
+    "location/description/salary/employment_type that the baseline extracts. "
+    "Prefer general detail-page enrichment (extend the existing enricher) "
+    "over per-site selectors. Goal: +10 points on this axis without "
+    "regressing the other three.",
+    "Axis: QUALITY_EXTRACTION. Target the biggest ATS cluster whose jobs are "
+    "being misclassified (nav/heading/CMS artefacts slipping through, or real "
+    "jobs being filtered out). Fix at the platform level — one handler, 3+ "
+    "sites improved. Goal: keep quality ≥ current champion's score (no Type 1 "
+    "regressions) while recovering missed jobs.",
+    "Axis: VOLUME_ACCURACY. Target clusters where volume_ratio is <0.9 or "
+    ">1.5 (over-extraction). Prefer pagination, structured-data cascading, or "
+    "API-level fixes over DOM hacks. Goal: tighten volume ratio toward 1.0 "
+    "without crossing the 1.5 over-extraction guard.",
 )
+
+
+def _weakest_axis(axes: dict) -> str:
+    """Return the axis with the lowest score (our target axis). Defaults to
+    field_completeness when axes are missing — that's the known weak spot
+    post-2026-04-14 reset."""
+    if not axes:
+        return "field_completeness"
+    return min(axes, key=lambda k: axes.get(k, 100))
+
+
+def _build_current_champion_head(current_model: dict, token: str | None = None) -> str:
+    """Queries the live champion + recent memory and returns a compact Markdown
+    block that leads the prompt. This is the ONE place Codex learns what the
+    current state of the world is; everything else in the prompt is diff against it.
+    """
+    # Champion composite + axes come from the last completed test run's summary
+    tr = current_model.get("latest_test_run") or {}
+    summary = (tr.get("results_detail") or {}).get("summary") or {}
+    champ = summary.get("champion_composite") or {}
+
+    axes = {k: champ.get(k, 0) for k in
+            ("discovery", "quality_extraction", "volume_accuracy", "field_completeness")}
+    composite = champ.get("composite", 0)
+
+    # Resolve live champion name via API if possible — falls back to whatever
+    # the test run labelled as champion.
+    champion_name = "unknown"
+    try:
+        if token:
+            models = api_get("/ml-models/?page=1&page_size=20", token).get("items", [])
+            for m in models:
+                if (m.get("status") or "").lower() in ("live", "champion"):
+                    champion_name = m["name"]
+                    break
+    except Exception:
+        pass
+    if champion_name == "unknown":
+        champion_name = current_model.get("name", "?")
+
+    weak_axis = _weakest_axis(axes)
+    gap_to_90 = max(0.0, 90.0 - float(composite or 0))
+
+    # Pull recent changes + bans from the memory store (v2 schema). If the
+    # module isn't importable (running outside backend sys.path) we quietly
+    # fall through to a minimal block — losing these signals is degradation,
+    # not a failure mode.
+    recent_changes = "_memory_store unavailable_"
+    banned = "_memory_store unavailable_"
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(PROJECT_DIR), "backend"))
+        from app.ml.champion_challenger import memory_store  # type: ignore
+        mem = memory_store.load()
+        recent_changes = memory_store.render_recent_changes_for_prompt(mem, max_items=3)
+        banned = memory_store.render_banned_for_prompt(mem)
+    except Exception as e:
+        print(f"[auto_improve] memory_store unavailable: {e}")
+
+    return f"""## CURRENT CHAMPION (queried live, 2026-04-14 reset baseline)
+
+Champion: **{champion_name}**   Composite: **{composite}**
+Axes: discovery {axes['discovery']} · quality {axes['quality_extraction']} · volume {axes['volume_accuracy']} · field-completeness {axes['field_completeness']}
+Target axis this run: **{weak_axis}**   Gap to 90: **{gap_to_90:.1f}**
+
+**Hard rule:** do NOT regress any axis currently ≥95. Each axis is capped at 100 — values above 100 indicate extraction bugs, not wins.
+
+## RECENT PLATFORM CHANGES (last 3 promotions)
+
+{recent_changes}
+
+## BANNED APPROACHES (recently regressed — do NOT retry this iteration)
+
+{banned}
+
+---
+
+"""
 
 
 def get_token() -> str:
@@ -144,26 +232,26 @@ def _detail_page_url_for(entry: dict) -> str | None:
 
 
 def _compact_baseline_selectors(entry: dict) -> dict:
-    """Extract a compact selector hint from baseline_full_wrapper.
+    """Return ONLY the three highest-signal selector keys from the baseline wrapper.
 
-    Shared helper with failure_analysis.build_next_iteration_brief — we want the
-    Codex prompt and the brief to describe selectors the same way.
+    Inlining the full wrapper was a token drain — Codex rarely needs every field,
+    and the full JSON already sits on disk at ``wrapper_file``. We keep:
+      - ``boundary``: container selector, the critical upstream choice.
+      - ``title``: proves the wrapper is actually locating job titles.
+      - ``details_page_description_paths``: the detail-page hint that drives
+        `field_completeness`, which is v6.9's dragging axis.
+    Any other key can be fetched by reading ``wrapper_file`` on disk.
     """
     w = entry.get("baseline_full_wrapper") or {}
     if not isinstance(w, dict):
         return {}
-    keys = (
-        "boundary", "title", "location", "salary", "employment_type",
-        "description", "apply_url",
-        "details_page_description_paths", "details_page_location_paths",
-        "list_url_pattern", "pagination",
-    )
+    keys = ("boundary", "title", "details_page_description_paths")
     out: dict = {}
     for k in keys:
         if k in w and w[k]:
             v = w[k]
-            if isinstance(v, str) and len(v) > 300:
-                v = v[:297] + "..."
+            if isinstance(v, str) and len(v) > 160:
+                v = v[:157] + "..."
             out[k] = v
     return out
 
@@ -303,7 +391,7 @@ def analyse_results(run: dict, context_dir: str) -> dict:
         "match_breakdown": summary.get("match_breakdown", {}),
         "tier_breakdown": summary.get("tier_breakdown", {}),
         "failures": failures[:MAX_FAILURES_IN_PROMPT],
-        "gaps": gaps[:MAX_FAILURES_IN_PROMPT],
+        "gaps": gaps[:MAX_GAPS_IN_PROMPT],
         "spot_checks": spot_checks,
         "success_count": len(successes),
         "fail_count": len(failures),
@@ -356,6 +444,7 @@ def build_prompt(
     next_version: str,
     best_accuracy: float = 0.66,
     focus_directive: str | None = None,
+    token: str | None = None,
 ) -> str:
     """Build the improvement prompt for Codex.
 
@@ -414,8 +503,19 @@ def build_prompt(
         )
         top_plays = default_library.retrieve(query_summary or current_name, k=3)
         plays_section = format_plays_for_prompt(top_plays)
-    except Exception as e:  # noqa: BLE001 — library is advisory
+        if not top_plays:
+            # Surface an empty library prominently — silent failure here is what
+            # caused Codex to run without exemplars for weeks. Pre-reset, the
+            # library held v6.0→v6.9 plays; the backfill_play_library.py script
+            # repopulates it from promoted test runs.
+            print(
+                "[auto_improve] play library is empty — run "
+                "`docker exec jobharvest-api python -m scripts.backfill_play_library` "
+                "to seed it from historical promotions"
+            )
+    except Exception as e:  # noqa: BLE001 — library is advisory but should be loud
         print(f"[auto_improve] could not retrieve play library: {e}")
+        import traceback; traceback.print_exc()
 
     focus_section = ""
     if focus_directive:
@@ -643,10 +743,12 @@ FIX THEM FIRST. A model improvement is worthless if the extractor can't even imp
     except Exception:
         pass
 
-    # Brief + focus directive + play-library exemplars go FIRST — Codex reads
-    # top-down and these are the most actionable pieces of this iteration's
-    # context. Exemplars sit below the brief so the axis-to-fix still leads.
-    prompt = f"""{brief_section}
+    # Dynamic head leads EVERY prompt — it's the one compact block that pins
+    # Codex to the current champion + target axis + banned approaches. Below it
+    # come the per-iteration brief, exemplars, and the canonical base prompt.
+    head_section = _build_current_champion_head(current_model, token=token)
+
+    prompt = f"""{head_section}{brief_section}
 {plays_section}
 {focus_section}
 ---
@@ -880,12 +982,16 @@ def run_codex(prompt: str, working_dir: str, model_id: str = ""):
             bufsize=1,
         )
 
-        deadline = time.time() + 2700  # 45 min max
+        # Per-candidate timeout: 20 min (was 45). In multi-candidate + pre-gate
+        # mode a 45-min hang on one candidate wastes the other candidates' turn.
+        # Overridable via CODEX_TIMEOUT_SEC env var.
+        _timeout = int(os.environ.get("CODEX_TIMEOUT_SEC", "1200"))
+        deadline = time.time() + _timeout
 
         with open(log_file, "a") as f:
             while proc.poll() is None:
                 if time.time() > deadline:
-                    msg = f"[{datetime.now().isoformat()}] TIMEOUT — killing Codex after 15 min"
+                    msg = f"[{datetime.now().isoformat()}] TIMEOUT — killing Codex after {_timeout//60} min"
                     f.write(msg + "\n")
                     print(msg)
                     proc.kill()
@@ -1373,28 +1479,17 @@ def check_convergence() -> bool:
 
 
 def update_memory_with_results(model_name: str, accuracy: float):
-    """Update the memory file with test results for the latest iteration."""
-    memory_file = os.path.join(os.path.dirname(PROJECT_DIR), "storage", "auto_improve_memory.json")
-    if not os.path.exists(memory_file):
-        return
-    try:
-        with open(memory_file) as f:
-            memory = json.load(f)
+    """No-op under the v2 memory schema (2026-04-14 reset).
 
-        # Find the iteration entry matching this model name and update its result
-        version_match = re.search(r"v(\d+\.\d+)", model_name)
-        if version_match:
-            version = f"v{version_match.group(1)}"
-            for entry in memory.get("iterations", []):
-                if entry.get("version") == version and entry.get("accuracy") is None:
-                    entry["accuracy"] = accuracy
-                    entry["result"] = f"{accuracy:.0%} success rate"
-                    break
-
-        with open(memory_file, "w") as f:
-            json.dump(memory, f, indent=2)
-    except Exception as e:
-        print(f"Warning: could not update memory file: {e}")
+    The old schema tracked one `iterations[]` entry per Codex run and back-filled
+    `accuracy` after the A/B test completed. The v2 schema instead splits that
+    responsibility: `memory_store.append_promotion` records promoted challengers
+    (called from the daemon after the promotion gate passes), and
+    `append_rejection` records candidates that fell short. Accuracy-alone isn't
+    meaningful without the axis breakdown, so recording it per-model is a
+    footgun we've deliberately removed.
+    """
+    return
 
 
 def record_iteration(model_name: str, accuracy: float, baseline_accuracy: float = 0):

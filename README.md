@@ -92,6 +92,8 @@ Infrastructure: Colima, Docker Compose, Caddy
 
 ## Auto-Improve Status
 
-- Latest extractor iteration: `v10.5` (`backend/app/crawlers/tiered_extractor_v100.py`)
-- Latest finder iteration: `v9.1` (`backend/app/crawlers/career_page_finder_v91.py`)
-- Focus of v10.5: recover JS-shell and static no-link failure patterns via shell endpoint extraction (`fetch('*.json')`, Workday/Martian hints), same-page section role parsing, and WordPress entry-title job-feed extraction while preserving v10.4 dedupe/metadata quality fixes.
+- **Live champion: `v6.9`** — `backend/app/crawlers/tiered_extractor_v69.py` + `backend/app/crawlers/career_page_finder_v69.py`. Crowned 2026-04-14 after re-scoring the full iteration history with the objective capped composite formula.
+- **Benchmark composite:** 85.4 / 100 (discovery 100, quality extraction 100, volume accuracy 96.2, field completeness 45.3) on 179 sites (129 fixed regression + 50 exploration).
+- **Scoring:** the composite is weighted 20% discovery + 30% quality extraction + 25% field completeness + 25% volume accuracy, each axis capped at 100. Promotion requires beating the champion's composite, ≥60% regression accuracy, and zero regressions on champion-passing sites.
+- **Next improvement run** will start from v6.9 as the source and attempt to raise `field_completeness` (the one under-ceiling axis) without giving back quality or volume.
+- Later iteration files (`v7.x`–`v10.x`) remain on disk for historical reference but are not registered as champions — the Models page and `ml_models` table were reset on 2026-04-14 to a single-source-of-truth: v6.9.

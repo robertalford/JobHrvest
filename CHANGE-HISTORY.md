@@ -2,6 +2,148 @@
 
 ---
 
+## 2026-04-14 (session 17 — Auto-improve loop: context refresh + speed/token optimisation)
+
+**Prompt:**
+Let's now plan how to update (ensure the auto-improve process is context aware of our recent changes and that it's set-up to achieve its objectives) and optimise (faster speed to analyse & implement improvements, better performance with regards to rapid & significant improvement iterations, and usage of minimal tokens per improvement iteration without compromising quality of outcomes).
+
+**Headline change:**
+The auto-improve daemon had been silently dead since 2026-04-09 (5 days), 12 orphan triggers piling up, 65 stale context dirs, the `ls -t tiered_extractor_v*.py | head -1` lookup resolving to `v91` instead of the crowned `v69` champion, and 161 KB of pre-reset memory file feeding Codex stale narrative. Daemon revived with watchdog + heartbeat, prompt rebuilt around a dynamic CURRENT-CHAMPION head queried live from the DB, multi-candidate Codex enabled (N=3, axis-sharded), token footprint cut by ~50 %, and per-iteration speed lifted by parallel detail-page enrichment and a run-scoped career-URL cache.
+
+**Hygiene (Part 1):**
+
+- `backend/scripts/auto_improve_daemon.py` — heartbeat thread (60 s), `_self_exec` watchdog on fatal/repeated errors, signal handlers for clean shutdown, v10 LLM-based track removed (~260 LOC dead path deleted), `_current_champion_tag` is now DB-authoritative (no filesystem fallback — that was the bug that let challengers inherit from `v91` instead of the crowned `v69`).
+- `storage/auto_improve_triggers/` — 12 orphan triggers archived to `storage/_archive/triggers_pre_v69/`.
+- `backend/app/crawlers/` — 69 obsolete extractors and 62 obsolete finders moved to `backend/app/crawlers/_archive/`. Active set: extractor `v16/v60/v69` + finder `v4/v26/v60/v69` plus the v69 transitive inheritance chain (v68, v67, v65, v64, v62, v61, v15, v14, v13, v12, v66) restored after archive caught it.
+- `backend/app/api/v1/endpoints/ml_models.py` + `backend/app/tasks/ml_tasks.py` — `_FINDER_MAP` pruned to active versions only.
+- `storage/v10_*` artefacts (prompt, queue, wrappers, improved markers, extractor v100) and `backend/scripts/v10_llm_worker.py` archived.
+- `backend/auto_improve_prompt_v*.md` (9 legacy prompts restored by merge `edd5856`) archived to `backend/_archive/prompts/`.
+- `storage/auto_improve_memory.json` rebuilt to v2 schema: 161 KB → 12 KB. Old memory archived. New schema has `baseline / banned_approaches / recent_promotions / recent_rejections / what_doesnt_work` + capped/deduped anti-pattern lists.
+- 65 obsolete `storage/auto_improve_context/v*` dirs archived; only `v6_9` remains.
+
+**Prompt layer (Part 2):**
+
+- `backend/app/ml/champion_challenger/memory_store.py` — NEW (~190 LOC): typed read/write helper for the v2 memory file. `load`, `append_promotion` (caps to 10, dual-writes to play_library), `append_rejection` (caps to 20), `ban_approach` (TTL-based decay, default 3 iterations), `decay_bans`, `render_recent_changes_for_prompt`, `render_banned_for_prompt`. Path resolution: env override → `/storage` bind mount → repo-root fallback.
+- `backend/scripts/auto_improve.py::build_prompt` — every prompt now leads with a `## CURRENT CHAMPION` block: live champion name, 4-axis scorecard, target axis (argmin), gap-to-90, plus `## RECENT PLATFORM CHANGES` (last 3 promotions from memory_store) and `## BANNED APPROACHES`. Hard rule injected: "do NOT regress any axis currently ≥95". Stale `update_memory_with_results` (referenced the old `iterations[]` schema) replaced with a no-op + docstring explaining why.
+- `new-prompt.md` rewritten end-to-end: 27 KB → 10.3 KB. Removed v10/v7.x/v2.x baseline references; replaced `ls -t tiered_extractor_v*.py | head -1` with DB-query instruction; deduplicated sections already canonical in `agent-instructions.md`; tables instead of prose for Description Quality and Error Types.
+- `backend/app/ml/champion_challenger/failure_analysis.py` — `_wrapper_selector_hint` compressed to 3 high-signal keys (`boundary`, `title`, `details_page_description_paths`) per-key cap 160 chars (was 11 keys / 300 chars). The full wrapper still lands on disk in the per-iteration context dir for Codex to open when needed.
+- `backend/scripts/auto_improve.py::_compact_baseline_selectors` — same 3-key compression; `MAX_FAILURES_IN_PROMPT` 8→4, `MAX_GAPS_IN_PROMPT` 4 (new); `PROMPT_MAX_BYTES` 28 KB → 16 KB ceiling.
+- `backend/scripts/backfill_play_library.py` — NEW (~95 LOC): walks `MLModelTestRun` records, writes one Play per promotion. Re-runnable. Empty-library no longer silent — auto_improve.py prints a loud warning + the backfill command if `default_library.retrieve` returns nothing.
+- `backend/app/ml/champion_challenger/play_library.py` — path resolution mirrors memory_store: explicit env → `/storage` mount → repo-root.
+- `DEFAULT_FOCUS_DIRECTIVES` rewritten: index 0 = `field_completeness` (v6.9's dragging axis at 45.3), index 1 = `quality_extraction`, index 2 = `volume_accuracy`. `AUTO_IMPROVE_CANDIDATES_N` default 1 → 3.
+
+**Speed (Part 3):**
+
+- Fixture-harness pre-gate (already wired) now records rejected challengers in `memory_store.append_rejection` so Codex sees the rejection next iteration.
+- `backend/app/tasks/ml_tasks.py::_run_model_phase` — run-scoped Redis cache `career_disc:{run_id}:{domain}:{finder_class}` so challenger phase reuses champion's discovery when the finder is identical (1 h TTL). Halves discovery probes per A/B run.
+- `backend/app/tasks/ml_tasks.py` — detail-page enrichment in baseline phase parallelised via `asyncio.gather` + `Semaphore(6)` (was a sequential 10-iteration loop adding ~30 s per detail-heavy site).
+- `backend/scripts/auto_improve.py::run_codex` — Codex per-candidate timeout 2700 s → 1200 s (env-overridable via `CODEX_TIMEOUT_SEC`).
+- AsyncClient-per-worker reuse (Part 3.4) deferred — analysis showed each task hits a different host so cross-task connection reuse doesn't help.
+
+**Verification (run on host + container):**
+
+- `python3 -m py_compile` clean on all edited modules.
+- Container imports `tiered_extractor_v69`, `career_page_finder_v69`, `memory_store`, `play_library`, `failure_analysis` cleanly after restoring v69's transitive inheritance chain.
+- Memory file resolves to `/storage/auto_improve_memory.json` (bind mount). Play library resolves to `/storage/play_library/`. Backfill writes 1 Play (v6.9 baseline) — survives container restart.
+- Composed prompt (with empty failures) is 14.2 KB — within 16 KB ceiling, dynamic head leads.
+- Daemon launched, heartbeat fresh, picked up new config (`Codex timeout: 1200s`, `Candidates per iteration: 3`) and immediately started v6.9 → v7.0 generation.
+- DB confirms v6.9 is the sole `status='live'` model (no other live models could mask the lookup).
+
+**Files of note:**
+
+- New: `backend/app/ml/champion_challenger/memory_store.py`, `backend/scripts/backfill_play_library.py`.
+- Archived (kept in git history under `_archive/` siblings): 69 extractors, 62 finders, 20 unit tests, 9 legacy prompts, v10 worker.
+- Plan: `~/.claude/plans/lively-chasing-mitten.md`.
+
+---
+
+## 2026-04-14 (session 16 — Seed GOLD holdout + wire TestData page)
+
+**Prompt:**
+This page is incomplete — run the seed script and verify the gold sets are ready for testing against. Also check if any other pages/features need to be seeded from a script — if so, do this now.
+
+**Headline change:**
+The Test Data page had placeholder copy ("Holdout set browser — coming next"). Now it's a real browser backed by the `gold_holdout_*` tables, seeded with a frozen AU baseline set that filters out aggregators and blocked domains before materialising. v6.9 is also registered in the hardened `model_versions` table so the champion/challenger orchestrator sees the same source of truth the Models page does.
+
+**Backend changes:**
+
+- `backend/app/ml/champion_challenger/holdout_builder.py` — hardened lead selection:
+  - Filters `lead_imports` by `ad_origin_category IN ('C. likely Career Site', 'employer')` — excludes job_boards, recruiters, aggregator feed dumps from entering the holdout.
+  - Loads aggregator netloc hosts from the `aggregator_sources` table for the target market (+ `GLOBAL`) and rejects leads whose origin domain or seed URL matches — covers Indeed, LinkedIn, Glassdoor, Adzuna, Talent.com, Careerjet, etc. without hardcoding.
+  - Respects `domain_blocklist.is_blocked` (SEEK, Jora, Jobstreet, JobsDB, `excluded_sites` rows).
+  - Catches recurring non-career hosts by fragment match (`amazonaws.com` s3 feeds, `linkedin.com` link-out shims, `careerone.com.au`, `superprof.com.au`, `volunteer.com.au`, `staffing.com.au`, `ethicaljobs.com.au`, `m.hays.com.au`, `michaelpage.com.au`, `api-dev.` staging shims).
+  - Over-selects 3× the requested `max_domains` and trims after filtering, so blocked/aggregator rejections don't starve the final set.
+- `backend/app/api/v1/endpoints/gold_holdout.py` — NEW: `GET /gold-holdout/sets/` (list all sets with stats rollup: domains / snapshots / verified_domains / ground_truth_jobs), `GET /gold-holdout/sets/{id}/domains` (paginated + search + verified_only filter, bulk-loads snapshot/job counts to avoid N+1 queries).
+- `backend/app/api/v1/router.py` — registers the new router under `/gold-holdout`.
+
+**Frontend changes:**
+
+- `frontend/src/components/pages/TestData.tsx` — full rewrite: lists holdout sets as cards (with domains / snapshots / verified / ground-truth-jobs rollup), shows verification-pending banner when `verified_domains < domains`, then a paginated/searchable domain table with per-domain snapshot and ground-truth badges. Deep-links each domain to its live site for manual spot-checking.
+- `frontend/src/lib/api.ts` — NEW: `getGoldHoldoutSets()`, `getGoldHoldoutDomains(setId, params)` + typed `GoldHoldoutSet` / `GoldHoldoutDomain` interfaces.
+
+**Seed actions:**
+
+1. Ran `docker exec -w /app jobharvest-api python -m scripts.build_gold_holdout --name au_baseline_v1 --market AU --max-domains 60 --description "AU gold holdout v1 — company career sites only, filtered against aggregators + blocked domains"`.
+2. Verified via DB: `au_baseline_v1` is_frozen=true, market_id=AU, id `53191efe-fedf-431b-80c9-641e0f799f10`. 60 domains, 38 snapshots (22 snapshot fetches failed — mostly 403s from anti-bot systems, retained in domain list).
+3. Sample of seeded domains (all legitimate company career pages, no aggregators):
+   - `smartjobs.qld.gov.au`, `dominos-australia.applynow.net.au`, `swinjobs.nga.net.au`, `careers.vic.gov.au`, `colescareers.com.au`, `careers.goodstart.org.au`, `amazon.jobs`, `jobs.deloitte.com.au`, `careers.woolworthsgroup.com.au`, `careers.mcdonalds.com.au`, `jobs.health.nsw.gov.au`, `careers.nab.com.au`, `careers.anz.com`, `recruitment.macquarie.com`, `jobs-au.pwc.com`, `ebuu.fa.ap1.oraclecloud.com` (Westpac), `jobsearch.baesystems.com`, `careers.stryker.com`, …
+4. Deleted the pre-fix `au_baseline_v1` set (which had leaked Jora/LinkedIn/Glassdoor/CareerOne/S3-feed domains before the filter was hardened) along with its 33 domain rows, 18 bad snapshots, and the on-disk `/storage/gold_holdout/*` files.
+5. Registered v6.9 in `model_versions` via `registry.register_model_version` + `registry.crown_initial_champion` (id `41c7897c-9e61-41b7-b8cf-5cda7fc6b857`, `status='champion'`, algorithm `heuristic_tiered_v69`, config includes composite breakdown + benchmark run id).
+
+**Other seed audit (no action needed):**
+Tables verified populated: `markets` (8), `companies` (31,981), `career_pages` (24,326), `jobs` (61,165), `excluded_sites` (5), `aggregator_sources` (36), `lead_imports` (67,868), `fixed_test_sites` (275), `site_url_test_data` (14,177), `site_wrapper_test_data` (15,104), `crawler_test_data` (14,696), `job_site_test_data` (14,696), `crawl_steps_test_data` (72,893), `app_users` (2), `system_settings` (3), `word_filters` (599), `geo_locations` (433,774), `run_queue` (212,001).
+Tables intentionally empty: `gold_holdout_jobs` (manual human verification step — script won't fabricate ground truth), `drift_baselines` (populated after the first training run), `ats_pattern_proposals` / `experiments` / `metric_snapshots` / `inference_metrics_hourly` (populated by orchestrator runs).
+
+**Verification:**
+- `GET /api/v1/openapi.json` includes `/api/v1/gold-holdout/sets` + `/api/v1/gold-holdout/sets/{set_id}/domains`.
+- Unauthenticated `GET /api/v1/gold-holdout/sets/` → 401 (auth guard works).
+- `tsc -b --noEmit` clean on the new TestData page + api.ts changes.
+- Frontend rebuilt + recreated via `docker compose -f docker-compose.server.yml build frontend && up -d frontend`; new bundle contains the new UI strings.
+
+**Follow-ups (not blocking):**
+- Populate `gold_holdout_jobs` via human verification — intentional manual step. The TestData UI shows a "verification pending" banner and per-domain badges so the verifier can triage.
+- Re-snapshot the 22 failed domains with `get_rendered` (Playwright) where anti-bot 403s blocked the plain HTTP fetch. Out of scope for this session.
+- Extend the orchestrator to link `model_versions` ↔ `ml_models` so promotion writes to both tables in one tx. Currently the two registries are separate: legacy `ml_models` for the per-iteration A/B loop, hardened `model_versions` for the McNemar/latency/drift path.
+
+---
+
+## 2026-04-14 (session 15 — Re-crown objective champion + clear Models history)
+
+**Prompt:**
+Based on the recent changes made, update `agent-instructions.md` (and any project files containing project overview or instructions/guidelines) so that it provides an accurate picture of the project, infra and process/approach we are taking — specifically related to the champion/challenger model setup. Also, on the Models page, clear the history and re-instate (re-evaluating older tests if necessary) the highest-performing model we've had to date, using the new more accurate/objective quality criteria, as the current champion for the next improvement run to create a new/better variant from and test against.
+
+**Headline change:**
+Re-scored the full iteration history (77 models, 95 completed test runs) using the **capped objective composite score** (each of the 4 axes clamped to [0, 100] before weighting — prior raw scores with `field_completeness > 100` were counting bugs, not improvements). **v6.9** emerged as the single highest-performing model with a composite of **85.4** (discovery 100, quality extraction 100, volume accuracy 96.2, field completeness 45.3), achieved on 179 sites (129 fixed regression + 50 exploration). It clearly beats every later iteration on the objective ceiling — v10.5, v10.4, v10.3, etc. only ever posted higher *uncapped* composites because of over-emitting / multi-valued field counting.
+
+**DB changes (Models page reset):**
+- Backup: `/tmp/jobharvest_models_backup_20260414_213403.sql` (52 MB; ml_models + ml_model_test_runs + codex_improvement_runs + ml_test_feedback data-only dump).
+- `DELETE FROM codex_improvement_runs` — 285 rows removed.
+- `DELETE FROM ml_models WHERE id <> 'bf05d0fd-db10-497f-a895-c461f8869854'` — 76 non-v6.9 model rows removed (CASCADE dropped 94 test runs).
+- Winning v6.9 benchmark test run retained (`c1f3caac-ff49-44ea-bd51-b477b40a9d8b`) with `test_name` updated to `'v6.9 baseline — crowned champion (objective composite 85.4)'`.
+- v6.9 row updated: `status='live'`, `is_active=true`, `updated_at=NOW()`.
+
+**Final state:**
+- `ml_models`: 1 row (v6.9, live).
+- `ml_model_test_runs`: 1 row (v6.9 benchmark).
+- `codex_improvement_runs`: 0 rows.
+
+**Doc updates:**
+- `agent-instructions.md` — replaced the `ML Model Auto-Improve System` section with a fuller `Site Config — Champion/Challenger Model & Auto-Improve` section that documents: the two-model pipeline, the current champion (v6.9 with breakdown), the objective composite score formula (with the mandatory cap at 100 per axis), the promotion gate, the full champion/challenger hardening under `backend/app/ml/champion_challenger/`, the per-iteration improvement loop (A/B test → Codex auto-improve → register → promote or retry), the auto-improve agent rules, and the pre-flight checklist before the next challenger run.
+- `MEMORY.md` — "Current Status" now calls out the Models page reset and names v6.9 as the sole live champion. "Champion/Challenger ML Loop" section now documents the objective composite as the *only* yardstick for per-iteration promotion, distinct from the hardened orchestrator's multi-metric gate.
+- `README.md` — replaced "Auto-Improve Status" to name v6.9 as live champion with its composite breakdown and note that post-v6.9 iteration files remain on disk for reference but are no longer registered.
+
+**Verification:**
+- `SELECT COUNT(*) FROM ml_models` → 1 (v6.9).
+- `SELECT COUNT(*) FROM ml_model_test_runs` → 1 (v6.9 benchmark).
+- `SELECT COUNT(*) FROM codex_improvement_runs` → 0.
+- `tiered_extractor_v69.py` and `career_page_finder_v69.py` both exist in `backend/app/crawlers/` and `69: 69` is present in `_FINDER_MAP` in both `backend/app/api/v1/endpoints/ml_models.py:1286` and `backend/app/tasks/ml_tasks.py:542`.
+
+**Scope notes / follow-ups:**
+- v6.9 is registered in the legacy `ml_models` table (which powers the Models page UI). It is **not yet** registered in `model_versions` (the hardened champion/challenger table). When the pre-flight checklist is run (GOLD holdout build + verify), step 5 is to call `registry.register_model_version` + `registry.crown_initial_champion` so the orchestrator sees the same champion the UI does.
+- Later iteration files (`v7.x`–`v10.x`) are intentionally left on disk for historical diagnostic value, but Codex should query the DB for the live champion (`SELECT name FROM ml_models WHERE status='live'`) and build on v6.9, not the highest-numbered file.
+
+---
+
 ## 2026-04-14 (session 14 — 3-section app redesign + Bulk Domain Processor)
 
 **Prompt:**

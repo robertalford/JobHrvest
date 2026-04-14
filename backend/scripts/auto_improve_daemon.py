@@ -16,7 +16,9 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from datetime import datetime
 
 import httpx
@@ -28,33 +30,57 @@ API_BASE = os.environ.get("JH_API_URL", "http://localhost:8001/api/v1")
 USERNAME = os.environ.get("JH_USERNAME", "r.m.l.alford@gmail.com")
 PASSWORD = os.environ.get("JH_PASSWORD", "Uu00dyandben!")
 CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.3-codex")
-CODEX_TIMEOUT = 2700  # 45 min
-POLL_INTERVAL = 30  # seconds between checks
+CODEX_TIMEOUT = int(os.environ.get("CODEX_TIMEOUT_SEC", "1200"))  # 20 min per candidate (see auto_improve.py for actual enforcement)
+POLL_INTERVAL = 30
+HEARTBEAT_INTERVAL = 60  # independent of main loop — proves daemon is alive
+AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "3"))
 STATUS_FILE = os.path.join(ROOT_DIR, "storage", "auto_improve_status.json")
 LOG_DIR = os.path.join(ROOT_DIR, "storage", "auto_improve_logs")
 
+_last_activity_msg = "starting"
+_last_activity_ts = datetime.now()
+
 
 def log(msg: str):
+    global _last_activity_msg, _last_activity_ts
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
+    print(f"[{ts}] {msg}", flush=True)
+    _last_activity_msg = msg
+    _last_activity_ts = datetime.now()
     _write_status(msg)
 
 
-def _write_status(msg: str):
-    """Write daemon status for health check API."""
+def _write_status(msg: str | None = None):
     try:
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
         status = {
-            "last_activity": datetime.now().isoformat(),
-            "message": msg[:200],
+            "last_activity": _last_activity_ts.isoformat(),
+            "message": (msg or _last_activity_msg)[:200],
             "pid": os.getpid(),
             "alive": True,
+            "heartbeat": datetime.now().isoformat(),
         }
         with open(STATUS_FILE, "w") as f:
             json.dump(status, f)
     except Exception:
         pass
+
+
+def _heartbeat_loop():
+    """Independent thread so the status file stays fresh even if the main loop blocks."""
+    while True:
+        _write_status()
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+def _self_exec():
+    """Re-exec the daemon — supervisor-less recovery from fatal errors."""
+    log("♻️ self-exec — restarting daemon process")
+    try:
+        os.execv(sys.executable, [sys.executable, "-B", "-u", os.path.abspath(__file__)])
+    except Exception as e:
+        print(f"execv failed: {e}", flush=True)
+        sys.exit(1)
 
 
 def get_token() -> str:
@@ -83,46 +109,19 @@ def get_models(token: str) -> list:
     return api_get("/ml-models/?page=1&page_size=20", token).get("items", [])
 
 
-def _is_v10_model(name: str) -> bool:
-    """Check if a model is a v10+ (LLM-based) model."""
-    ver = _extract_version(name)
-    return ver is not None and ver >= 100
-
-
 def find_model_needing_improvement(token: str) -> dict | None:
-    """Find a model that needs improvement.
+    """Find the next heuristic tiered_extractor model that needs auto-improve.
 
-    Two separate tracks:
-    - v10+ (LLM): always improve v10.0 in-place (iterate on prompt/code, re-test same model)
-    - v8.x (heuristic): improve from best model, create new versions
-
-    v10+ is prioritized.
+    Rollback: if the most recent candidate regressed >5% vs the all-time best
+    composite, improve from the best model instead so the next challenger
+    rebaselines from the strongest known champion.
     """
     models = get_models(token)
 
-    # ── Track 1: Check for v10+ model needing improvement ──
-    for model in models:
-        if not _is_v10_model(model.get("name", "")):
-            continue
-        tr = model.get("latest_test_run")
-        if not tr or tr.get("status") != "completed":
-            continue
-        config = tr.get("test_config") or {}
-        if not config.get("auto_improve"):
-            continue
-        # v10 uses a marker file to prevent re-processing the same test run
-        marker = os.path.join(ROOT_DIR, "storage", f"v10_improved_{tr['id']}")
-        if os.path.exists(marker):
-            continue  # Already improved from this test run
-        return model
-
-    # ── Track 2: v8.x heuristic models (original logic) ──
     latest_completed = None
     for model in models:
         if model.get("model_type") != "tiered_extractor":
             continue
-        if _is_v10_model(model.get("name", "")):
-            continue  # Skip v10+ models
         tr = model.get("latest_test_run")
         if not tr or tr.get("status") != "completed":
             continue
@@ -143,13 +142,10 @@ def find_model_needing_improvement(token: str) -> dict | None:
     if not latest_completed:
         return None
 
-    # Rollback logic for v8.x only
     best_model = None
     best_score = 0
     for model in models:
         if model.get("model_type") != "tiered_extractor":
-            continue
-        if _is_v10_model(model.get("name", "")):
             continue
         tr = model.get("latest_test_run")
         if not tr or tr.get("status") != "completed":
@@ -316,11 +312,11 @@ def is_test_running(token: str) -> bool:
 
 
 def _current_champion_tag(token: str) -> str | None:
-    """Return the live champion's normalised version tag (e.g. 'v91') or None.
+    """Return the live champion's normalised version tag (e.g. 'v69') or None.
 
-    Used by the fixture harness to compare challenger vs champion offline.
-    Falls back to the highest-numbered extractor file on disk if the API
-    doesn't expose a live model.
+    DB-authoritative: uses status='live' only. No filesystem fallback —
+    filesystem ordering (``ls -t``) was the bug that let challengers inherit
+    from the wrong file after 2026-04-14 when the Models page was reset.
     """
     try:
         models = get_models(token)
@@ -329,18 +325,9 @@ def _current_champion_tag(token: str) -> str | None:
             name = m.get("name") or ""
             if status in ("live", "champion") and name.startswith("v"):
                 return name.replace(".", "")
-    except Exception:
-        pass
-    # Fallback: pick the highest-numbered file (excluding the one we just wrote
-    # if the caller mutates PROJECT_DIR-level state; we leave that to the caller)
-    import glob
-    paths = glob.glob(os.path.join(PROJECT_DIR, "app", "crawlers", "tiered_extractor_v*.py"))
-    best = 0
-    for p in paths:
-        m = re.search(r"tiered_extractor_v(\d+)\.py", p)
-        if m:
-            best = max(best, int(m.group(1)))
-    return f"v{best}" if best else None
+    except Exception as e:
+        log(f"⚠️ champion tag lookup failed: {e}")
+    return None
 
 
 def _extract_version(name: str) -> int | None:
@@ -470,265 +457,8 @@ def _determine_test_winner(model: dict) -> str | None:
     return None
 
 
-def run_v10_improvement(model: dict, token: str):
-    """Run one v10 improvement iteration: self-review → Codex (full autonomy) → rebuild → re-test.
-
-    Unlike v8.x iterations which create new Python files, v10 improves in-place:
-    - Codex can modify the extraction prompt, the extractor code, the LLM worker, or anything else
-    - Codex reviews its own previous run logs to understand what to improve
-    - The same v10.0 model is re-tested after changes
-    """
-    model_name = model["name"]
-    model_id = model["id"]
-    tr = model.get("latest_test_run") or {}
-    test_run_id = tr.get("id")
-
-    log(f"🔄 Starting v10 improvement for {model_name}")
-
-    # Create improvement run record
-    imp_run = _create_improvement_run(token, {
-        "source_model_id": model_id,
-        "test_run_id": test_run_id,
-        "source_model_name": model_name,
-        "test_winner": _determine_test_winner(model),
-        "status": "analysing",
-    })
-    imp_run_id = imp_run["id"] if imp_run else None
-
-    # Import auto_improve for analysis
-    sys.path.insert(0, PROJECT_DIR)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("auto_improve",
-        os.path.join(PROJECT_DIR, "scripts", "auto_improve.py"))
-    ai = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ai)
-
-    # Get test run results
-    runs = api_get(f"/ml-models/{model_id}/test-runs?page=1&page_size=1", token)
-    if not runs["items"]:
-        log("❌ No test run found")
-        if imp_run_id:
-            _update_improvement_run(token, imp_run_id, {"status": "failed", "error_message": "No test run found"})
-        return
-
-    run = runs["items"][0]
-
-    # Analyse results (reuse existing analysis for failure/gap context files)
-    context_dir = os.path.join(ROOT_DIR, "storage", "auto_improve_context", "v10_latest")
-    analysis = ai.analyse_results(run, context_dir)
-    log(f"📊 v10 Results: {analysis['accuracy']:.0%} ({analysis['success_count']}/{analysis['total_sites']})")
-    log(f"📊 Failures: {analysis['fail_count']}, Gaps: {analysis.get('gap_count', 0)}, Volume: {analysis.get('volume_ratio', 0):.0%}")
-
-    if imp_run_id:
-        _update_improvement_run(token, imp_run_id, {"status": "running_codex"})
-
-    # ── Build v10 self-improvement prompt ──
-    # Read the base v10 auto-improve instructions
-    v10_prompt_file = os.path.join(ROOT_DIR, "storage", "v10_auto_improve_prompt.md")
-    try:
-        with open(v10_prompt_file) as f:
-            base_prompt = f.read()
-    except FileNotFoundError:
-        base_prompt = "Improve the v10 extraction system. Read storage/v10_extraction_prompt.md and modify it."
-
-    # Read the previous Codex log for self-review
-    prev_log_content = ""
-    prev_log_file = os.path.join(LOG_DIR, f"{model_id}.log")
-    if os.path.exists(prev_log_file):
-        try:
-            with open(prev_log_file) as f:
-                raw = f.readlines()
-            # Extract key lines: errors, decisions, file changes
-            important = []
-            for line in raw:
-                ll = line.lower().strip()
-                if any(kw in ll for kw in ["error", "fail", "❌", "⚠️", "🤖", "📝", "✏️",
-                                            "timeout", "implemented", "created", "modified"]):
-                    important.append(line.strip())
-            if important:
-                prev_log_content = "\n".join(important[-50:])  # Last 50 important lines
-        except Exception:
-            pass
-
-    # Build failure/gap details (same format as v8.x)
-    failures_text = ""
-    for i, f in enumerate(analysis.get("failures", [])[:10]):
-        failures_text += f"""
---- Failure {i+1}: {f['match']} ---
-Company: {f['company']} | Domain: {f['domain']}
-Test URL: {f['test_url']}
-Baseline: {f['baseline_jobs']} jobs | Titles: {f['baseline_titles'][:3]}
-Model: {f['model_jobs']} jobs | Error: {f['model_error']}
-Context HTML: {f.get('html_file', 'N/A')}
-Wrapper JSON: {f.get('wrapper_file', 'N/A')}
-"""
-
-    gaps_text = ""
-    for i, g in enumerate(analysis.get("gaps", [])[:10]):
-        gaps_text += f"""
---- Gap {i+1}: {g['match']} (volume: {g.get('volume_ratio', 0):.0%}) ---
-Company: {g['company']} | Domain: {g['domain']}
-Baseline: {g['baseline_jobs']} jobs | Model: {g['model_jobs']} jobs
-Context HTML: {g.get('html_file', 'N/A')}
-"""
-
-    # Build the full Codex prompt
-    prompt = f"""{base_prompt}
-
----
-
-## STEP 1: Self-Review — What Happened Last Time
-
-{"### Previous Run Log" + chr(10) + "```" + chr(10) + prev_log_content + chr(10) + "```" if prev_log_content else "No previous run log available (first iteration)."}
-
-## STEP 2: Current Test Results
-
-Model: {model_name}
-Accuracy: {analysis['accuracy']:.0%} ({analysis['success_count']}/{analysis['total_sites']} sites passed)
-Volume ratio: {analysis.get('volume_ratio', 0):.0%} of baseline
-Match breakdown: {json.dumps(analysis['match_breakdown'])}
-
-### Failures ({analysis['fail_count']} sites)
-{failures_text if failures_text.strip() else "No hard failures."}
-
-### Gaps ({analysis.get('gap_count', 0)} sites)
-{gaps_text if gaps_text.strip() else "No gaps."}
-
-### Context Files
-Full HTML and wrapper configs are in: {context_dir}
-File patterns: `failure_N_domain.html`, `gap_N_domain.html`, `*_wrapper.json`
-
-## STEP 3: Your Mission
-
-You have FULL AUTONOMY. You may modify ANY files to improve the v10 extraction system:
-
-- `storage/v10_extraction_prompt.md` — the prompt sent to the LLM for each site
-- `backend/app/crawlers/tiered_extractor_v100.py` — the extractor code
-- `backend/scripts/v10_llm_worker.py` — the host-side Codex worker
-- Create new utility scripts, tools, or helpers
-- Add heuristics, pre-processing, or post-processing logic
-
-The goal: increase the number of sites where v10 successfully extracts jobs that match
-the baseline (Jobstream wrapper). Currently at {analysis['accuracy']:.0%} — every percentage
-point matters.
-
-### Key principles:
-1. **Analyse failures deeply** — read the context HTML files to understand WHY extraction failed
-2. **Fix the biggest categories first** — if 10 sites fail because the LLM can't parse tables, fix table extraction
-3. **Test your changes** — use the context HTML files to verify your improvements work
-4. **Be bold** — small incremental tweaks got v8.x stuck at 46%. Try fundamentally different approaches.
-5. **The LLM worker runs codex exec on the host** — it has access to the full filesystem via /storage/v10_queue/
-
-### Sandbox rules:
-- DO NOT use Playwright, Docker, curl, or API calls (sandbox restrictions)
-- DO use Python scripts to test extraction against context HTML files
-- DO modify the extraction prompt and/or extractor code
-"""
-
-    # Save and run Codex
-    os.makedirs(LOG_DIR, exist_ok=True)
-    prompt_file = os.path.join(LOG_DIR, f"{model_id}_prompt.md")
-    with open(prompt_file, "w") as f:
-        f.write(prompt)
-
-    log(f"🤖 Running Codex ({CODEX_MODEL}) for v10 improvement...")
-    exit_code = ai.run_codex(prompt, ROOT_DIR, model_id)
-    log(f"Codex exited with code {exit_code}")
-
-    if exit_code != 0:
-        log(f"❌ Codex failed with exit code {exit_code} — skipping deployment")
-        if imp_run_id:
-            _update_improvement_run(token, imp_run_id, {
-                "status": "failed",
-                "error_message": f"Codex failed with exit code {exit_code}",
-            })
-        raise RuntimeError(f"Codex failed with exit code {exit_code}")
-
-    # Mark this test run as processed (prevent re-processing)
-    marker = os.path.join(ROOT_DIR, "storage", f"v10_improved_{test_run_id}")
-    with open(marker, "w") as f:
-        f.write(f"Improved at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-    # Rebuild API + workers to pick up any code changes
-    log("🔄 Rebuilding containers to pick up v10 changes...")
-    try:
-        subprocess.run(
-            ["docker", "compose", "-f", "docker-compose.server.yml", "up", "-d", "--build",
-             "api", "celery-worker", "celery-worker-2", "celery-worker-ml", "celery-worker-ml-test"],
-            cwd=ROOT_DIR, capture_output=True, timeout=180)
-        time.sleep(10)
-        log("✅ Containers rebuilt")
-    except Exception as e:
-        log(f"⚠️ Rebuild issue: {e}")
-
-    # Restart the v10 LLM worker (it runs on the host)
-    try:
-        subprocess.run(["pkill", "-f", "v10_llm_worker"], capture_output=True, timeout=5)
-        time.sleep(2)
-        subprocess.Popen(
-            ["python3", "-B", "-u", os.path.join(PROJECT_DIR, "scripts", "v10_llm_worker.py")],
-            stdout=open("/tmp/v10_llm_worker.log", "w"),
-            stderr=subprocess.STDOUT,
-            cwd=ROOT_DIR,
-        )
-        log("✅ v10 LLM worker restarted")
-    except Exception as e:
-        log(f"⚠️ LLM worker restart issue: {e}")
-
-    # Re-trigger test on the same v10.0 model
-    token = get_token()
-    try:
-        api_post(f"/ml-models/{model_id}/test-runs/execute", token, {
-            "sample_size": 50,
-            "auto_improve": True,
-            "use_fixed_set": True,
-            "include_exploration": False,
-        })
-        log(f"✅ Test re-triggered for {model_name}")
-    except Exception as e:
-        log(f"❌ Test trigger failed: {e}")
-
-    # Build description
-    description = _build_improvement_description(analysis, model_id, model_name, "v10.0 (improved)")
-
-    if imp_run_id:
-        _update_improvement_run(token, imp_run_id, {
-            "status": "completed",
-            "output_model_id": model_id,  # Same model — improved in-place
-            "output_model_name": f"{model_name} (iter {len(os.listdir(os.path.join(ROOT_DIR, 'storage'))) if False else '?'})",
-            "description": description,
-        })
-
-    # Wait for the test to complete before returning — prevents the main loop
-    # from immediately starting another Codex run while the test is still running
-    log(f"⏳ Waiting for test to complete before next iteration...")
-    test_wait_start = time.time()
-    test_wait_timeout = 600  # 10 min max wait
-    while time.time() - test_wait_start < test_wait_timeout:
-        time.sleep(POLL_INTERVAL)
-        try:
-            token = get_token()
-            models = get_models(token)
-            for m in models:
-                if m["id"] == model_id:
-                    tr = m.get("latest_test_run")
-                    if tr and tr.get("status") == "completed":
-                        # Report test results
-                        rd = tr.get("results_detail") or {}
-                        summary = rd.get("summary") or {}
-                        ch = summary.get("challenger_composite") or {}
-                        score = ch.get("composite", 0)
-                        sites = ch.get("sites_matched", 0)
-                        total = ch.get("total_sites", 0)
-                        log(f"📊 Test completed: {score:.1f} composite, {sites}/{total} sites matched")
-                        return
-                    elif tr and tr.get("status") == "running":
-                        elapsed = int(time.time() - test_wait_start)
-                        log(f"⏳ Test still running ({elapsed}s elapsed)...")
-                    break
-        except Exception as e:
-            log(f"⚠️ Error checking test status: {e}")
-    log(f"⚠️ Test wait timed out after {test_wait_timeout}s")
+# v10 LLM-based improvement track was retired 2026-04-14. Only the heuristic
+# run_improvement path below is active. To revive, recover from git history.
 
 
 def run_improvement(model: dict, token: str):
@@ -904,7 +634,6 @@ def run_improvement(model: dict, token: str):
             cmd.extend(["--champion", champion_tag])
         fixture_res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if fixture_res.returncode == 1:
-            # Challenger regressed beyond tolerance — skip the full A/B
             log(f"❌ Fixture smoke failed — skipping full A/B test")
             log(f"   stdout tail: {(fixture_res.stdout or '')[-500:]}")
             if imp_run_id:
@@ -912,6 +641,16 @@ def run_improvement(model: dict, token: str):
                     "status": "failed",
                     "error_message": "Fixture smoke regressed beyond tolerance",
                 })
+            # Record the rejection in memory so Codex sees it next iteration.
+            # Runs inside the API container where memory_store + fixture_harness live.
+            try:
+                subprocess.run([
+                    "docker", "exec", "jobharvest-api", "python3", "-c",
+                    f"from app.ml.champion_challenger.memory_store import append_rejection; "
+                    f"append_rejection('{next_version}', 'fixture harness regressed beyond tolerance')"
+                ], capture_output=True, timeout=10)
+            except Exception as e:
+                log(f"⚠️ could not record fixture rejection in memory: {e}")
             return
         elif fixture_res.returncode == 2:
             log("⚠️ Fixture harness could not run (no fixtures yet?) — proceeding to A/B")
@@ -967,12 +706,26 @@ def run_improvement(model: dict, token: str):
         })
 
 
+def _install_signal_handlers():
+    def _graceful(sig, frame):
+        log(f"received signal {sig} — shutting down")
+        _write_status("shutdown")
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _graceful)
+    signal.signal(signal.SIGINT, _graceful)
+
+
 def main():
+    _install_signal_handlers()
+    threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+
     log("🚀 Auto-improve daemon started")
     log(f"  Codex model: {CODEX_MODEL}")
     log(f"  Codex timeout: {CODEX_TIMEOUT}s")
     log(f"  Poll interval: {POLL_INTERVAL}s")
+    log(f"  Candidates per iteration: {AUTO_IMPROVE_CANDIDATES_N}")
 
+    consecutive_errors = 0
     while True:
         try:
             token = get_token()
@@ -981,30 +734,24 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Check if a test is currently running — wait for it
             if is_test_running(token):
                 _write_status("Waiting for test to complete...")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Find a model that needs improvement
             model = find_model_needing_improvement(token)
             if not model:
                 _write_status("Idle — no models need improvement")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Run the improvement (route v10+ to its own function)
             try:
-                if _is_v10_model(model.get("name", "")):
-                    run_v10_improvement(model, token)
-                else:
-                    run_improvement(model, token)
+                run_improvement(model, token)
+                consecutive_errors = 0
             except Exception as e:
                 log(f"❌ Improvement failed: {e}")
-                import traceback
                 traceback.print_exc()
-                # Wait before retrying to avoid tight error loops
+                consecutive_errors += 1
                 time.sleep(120)
 
         except KeyboardInterrupt:
@@ -1012,8 +759,29 @@ def main():
             break
         except Exception as e:
             log(f"❌ Daemon error: {e}")
+            traceback.print_exc()
+            consecutive_errors += 1
             time.sleep(60)
+
+        # Self-heal: if we've failed many times in a row, re-exec ourselves. Importing
+        # modules or client state may have degraded; a fresh process often clears it.
+        if consecutive_errors >= 5:
+            log(f"⚠️ {consecutive_errors} consecutive errors — self-exec for a clean start")
+            _self_exec()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as e:
+        # Catch-all: record the fatal error and re-exec so the daemon doesn't stay dead
+        # unattended. A persistent bug will still crash on restart, but at least the
+        # health check will reflect that (heartbeat keeps updating until the crash).
+        traceback.print_exc()
+        try:
+            _write_status(f"fatal: {e!r}")
+        except Exception:
+            pass
+        _self_exec()

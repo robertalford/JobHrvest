@@ -1258,41 +1258,13 @@ async def execute_test_run(
                 pass
         return TieredExtractor
 
-    # Finder version mapping: model version → finder file version
+    # Finder version mapping: model version → finder file version.
+    # Post-2026-04-14 reset — only v69 (champion), v60 (reference), and stable bases
+    # remain. Next challenger versions will add themselves via _FINDER_MAP updates
+    # when their extractor + finder files are created.
     _FINDER_MAP = {
-        100: 82,  # v10.0 — LLM extractor, uses v82 finder (best discovery)
-        91: 91,  # v9.1 linked-card account-label filter + EasyJobs card extractor with finder parity
-        90: 90,  # v9.0 progressive pagination sequencing + title precision recovery with finder parity
-        89: 89,  # v8.9 structured card/table recovery + pagination fill with finder parity
-        88: 88,  # v8.8 ATS row recovery + bounded pagination fill with finder parity
-        87: 87,  # v8.7 same-page anchor preservation + careers-page/workday volume recovery with finder parity
-        86: 86,  # v8.6 structured-title dedupe fix + Jobmonster page2 + module-shell render trigger with finder parity
-        85: 85,  # v8.5 Jobs2Web shell recovery + multi-location/open-state extraction with finder parity
-        84: 84,  # v8.4 ATS row-volume recovery (Jobvite/TalentSoft/Jobs2Web DOM) with finder parity
-        83: 83,  # v8.3 super-first fallback arbitration + row/pagination recovery with finder parity
-        82: 82,  # v8.2 heading-action recovery + superset arbitration with finder parity
-        81: 81,  # v8.1 structured-row multilingual recovery with finder parity
-        80: 80,  # v8.0 query-table recovery + text hygiene with finder parity
-        79: 79,  # v7.9 linked-card precision + numeric detail fallback with finder parity
-        78: 78,  # v7.8 careers-page API + Connx URL-repair extractor with finder parity
-        77: 77,  # v7.7 row-context quality recovery + finder parity
-        76: 76,  # v7.6 split-row ATS + multilingual strong-URL card recovery
-        75: 75,  # v7.5 title/Connx/depth refresh extractor + finder parity
-        74: 74,  # v7.4 PageUp/Recruitee/JSON-feed extractor + finder parity
-        73: 73,  # v7.3 stricter nav filtering + Nuxt row pagination + finder parity
-        72: 72,  # v7.2 metadata/depth recovery + Nuxt shell fallback with finder parity
-        71: 71,  # v7.1 precision reset + SuccessFactors/Homerun extractors with finder parity
-        70: 70,  # v7.0 linked-card completeness + fast-path enrichment with finder parity
-        69: 69,  # v6.9 Jobs2Web probe ordering + heading FP guard with finder parity
-        68: 68,  # v6.8 ATS-first extraction fixes (Jobvite/Jobs2Web) with finder parity
-        67: 67,  # v6.7 TLS-resilient hint fetch + linked-card extractor parity
-        66: 66,  # v6.6 fast static fallback + AWSM + Jobs2Web extractor parity
-        65: 65,  # v6.5 title validation + Manatal ATS + title normalization
-        64: 64,  # v6.4 speed fixes + SPA fallback
-        63: 63,  # v6.3 with URL hints + listing-dense scoring
-        62: 62,  # v6.2 with SPA detection + better discovery
-        61: 61,  # v6.1 with localized discovery
-        60: 60,  # v6.0 consolidated
+        69: 69,  # v6.9 champion
+        60: 60,  # v6.0 consolidated reference
         20: 20, 17: 5, 16: 4, 15: 3, 14: 2, 13: 2, 12: 2,
     }
 
