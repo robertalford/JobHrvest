@@ -30,7 +30,7 @@ API_BASE = os.environ.get("JH_API_URL", "http://localhost:8001/api/v1")
 USERNAME = os.environ.get("JH_USERNAME", "r.m.l.alford@gmail.com")
 PASSWORD = os.environ.get("JH_PASSWORD", "Uu00dyandben!")
 CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.3-codex")
-CODEX_TIMEOUT = int(os.environ.get("CODEX_TIMEOUT_SEC", "1200"))  # 20 min per candidate (see auto_improve.py for actual enforcement)
+CODEX_TIMEOUT = int(os.environ.get("CODEX_TIMEOUT_SEC", "1800"))  # 30 min per candidate. Was 1200 (20 min) and that proved too tight when Codex genuinely needed time to investigate before writing — see auto_improve.py for actual enforcement.
 POLL_INTERVAL = 30
 HEARTBEAT_INTERVAL = 60  # independent of main loop — proves daemon is alive
 AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "3"))
@@ -564,18 +564,53 @@ def run_improvement(model: dict, token: str):
     exit_code = ai.run_codex(prompt, ROOT_DIR, model_id)
     log(f"Codex exited with code {exit_code}")
 
-    if exit_code != 0:
-        log(f"❌ Codex failed with exit code {exit_code} — skipping deployment")
-        if imp_run_id:
-            _update_improvement_run(token, imp_run_id, {
-                "status": "failed",
-                "error_message": f"Codex failed with exit code {exit_code}",
-            })
-        raise RuntimeError(f"Codex failed with exit code {exit_code}")
-
-    # Post-Codex deployment
+    # Post-Codex deployment.
+    #
+    # Soft-success path: when Codex is killed by the wall-clock timeout
+    # (`proc.kill()` sends SIGKILL → exit_code=None) it often has already
+    # finished writing the new extractor file — the timeout commonly fires
+    # during the model's final self-review summary, after the file write.
+    # Discarding that work and re-running Codex from scratch is expensive
+    # (≈30 min × N candidates). Instead, when exit_code != 0:
+    #   1) Check if the extractor file was created
+    #   2) Try to import it inside the api container
+    # If both pass, proceed with deployment regardless of exit code. The
+    # downstream import verification + fixture harness still gate broken code.
     extractor_file = os.path.join(PROJECT_DIR, "app", "crawlers",
                                    f"tiered_extractor_v{next_file_ver}.py")
+    soft_success = False
+    if exit_code != 0:
+        if not os.path.exists(extractor_file):
+            log(f"❌ Codex failed (exit {exit_code}) and did not create {extractor_file} — skipping deployment")
+            if imp_run_id:
+                _update_improvement_run(token, imp_run_id, {
+                    "status": "failed",
+                    "error_message": f"Codex failed with exit code {exit_code} and produced no extractor",
+                })
+            raise RuntimeError(f"Codex failed with exit code {exit_code}")
+
+        # Quick import probe — does the file import cleanly inside the running
+        # api container? If yes, treat as soft-success.
+        log(f"⚠️ Codex exited with {exit_code} but {os.path.basename(extractor_file)} exists — probing import")
+        probe = subprocess.run(
+            ["docker", "exec", "jobharvest-api", "python3", "-c",
+             f"from app.crawlers.tiered_extractor_v{next_file_ver} "
+             f"import TieredExtractorV{next_file_ver}; print('OK')"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if "OK" in (probe.stdout or ""):
+            log(f"✅ Soft-success: extractor imports cleanly — proceeding to deploy")
+            soft_success = True
+        else:
+            log(f"❌ Codex failed (exit {exit_code}) AND extractor doesn't import — skipping deployment")
+            log(f"   import stderr: {(probe.stderr or '')[:300]}")
+            if imp_run_id:
+                _update_improvement_run(token, imp_run_id, {
+                    "status": "failed",
+                    "error_message": f"Codex failed (exit {exit_code}); extractor file present but import failed",
+                })
+            raise RuntimeError(f"Codex failed with exit code {exit_code} and extractor import failed")
+
     if not os.path.exists(extractor_file):
         log(f"❌ Codex did not create {extractor_file}")
         if imp_run_id:
@@ -585,7 +620,7 @@ def run_improvement(model: dict, token: str):
             })
         return
 
-    log(f"✅ Extractor file created. Deploying...")
+    log(f"✅ Extractor file present (soft_success={soft_success}). Deploying...")
 
     # Update status to deploying
     if imp_run_id:

@@ -1082,10 +1082,14 @@ def run_codex(prompt: str, working_dir: str, model_id: str = ""):
             bufsize=1,
         )
 
-        # Per-candidate timeout: 20 min (was 45). In multi-candidate + pre-gate
-        # mode a 45-min hang on one candidate wastes the other candidates' turn.
-        # Overridable via CODEX_TIMEOUT_SEC env var.
-        _timeout = int(os.environ.get("CODEX_TIMEOUT_SEC", "1200"))
+        # Per-candidate timeout: 30 min default. Was 20 min and that killed
+        # Codex right at the end of productive runs (e.g. 2026-04-14, where
+        # Codex had finished writing v70 but timed out during its final
+        # self-review summary, leaving an unwired but valid extractor).
+        # Overridable via CODEX_TIMEOUT_SEC env var; lower it to 1200 (20 min)
+        # if you re-enable multi-candidate parallel mode and want tighter
+        # peer-blocking semantics.
+        _timeout = int(os.environ.get("CODEX_TIMEOUT_SEC", "1800"))
         deadline = time.time() + _timeout
 
         with open(log_file, "a") as f:
