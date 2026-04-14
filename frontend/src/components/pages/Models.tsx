@@ -9,7 +9,7 @@ import {
   executeMLModelTestRun, getMLModelTestRuns,
   getFeedback, createFeedback, updateFeedback, deleteFeedback, uploadFeedbackScreenshot,
   triggerAutoImprove, getAutoImproveLog, getAutoImproveActivity,
-  getImprovementRuns,
+  getImprovementRuns, getRecentTestRuns,
 } from '../../lib/api';
 import {
   Brain, Loader2, ChevronLeft, ChevronRight, Trash2,
@@ -478,6 +478,14 @@ export function Models() {
   });
   const improvementRuns: ImprovementRun[] = improvementData?.items ?? [];
 
+  // Fetch all recent test runs (not just latest per model) for the unified timeline
+  const { data: recentTestRunsData } = useQuery({
+    queryKey: ['recent-test-runs'],
+    queryFn: () => getRecentTestRuns(50).catch(() => ({ items: [] })),
+    refetchInterval: 5000,
+  });
+  const recentTestRuns = recentTestRunsData?.items ?? [];
+
   // Refresh countdown
   const [countdown, setCountdown] = useState(5);
   React.useEffect(() => {
@@ -694,13 +702,38 @@ export function Models() {
                 </thead>
                 <tbody>
                   {(() => {
-                    // Build unified row list
+                    // Build unified row list using ALL recent test runs (not just latest per model)
                     type UnifiedRow = { type: 'test'; data: MLModel; sortDate: number } | { type: 'improvement'; data: ImprovementRun; sortDate: number };
                     const rows: UnifiedRow[] = [];
 
-                    for (const m of items) {
-                      const d = m.latest_test_run?.started_at || m.latest_test_run?.created_at || m.created_at;
-                      rows.push({ type: 'test', data: m, sortDate: d ? new Date(d).getTime() : 0 });
+                    // Use recent test runs if available, otherwise fall back to one-per-model
+                    if (recentTestRuns.length > 0) {
+                      const seenRunIds = new Set<string>();
+                      for (const tr of recentTestRuns) {
+                        if (seenRunIds.has(tr.id)) continue;
+                        seenRunIds.add(tr.id);
+                        // Build an MLModel-compatible object from the test run
+                        const syntheticModel: MLModel = {
+                          id: tr.model_id,
+                          name: tr.model_name || 'Unknown',
+                          description: tr.model_description,
+                          model_type: 'tiered_extractor',
+                          status: tr.status === 'running' ? 'new' : (tr.model_status || 'tested'),
+                          created_at: tr.created_at,
+                          latest_test_run: tr,
+                          baseline_summary: tr.baseline_summary,
+                          champion_summary: tr.champion_summary,
+                          model_summary: tr.model_summary,
+                          labels: tr.labels,
+                        } as MLModel;
+                        const d = tr.started_at || tr.created_at;
+                        rows.push({ type: 'test', data: syntheticModel, sortDate: d ? new Date(d).getTime() : 0 });
+                      }
+                    } else {
+                      for (const m of items) {
+                        const d = m.latest_test_run?.started_at || m.latest_test_run?.created_at || m.created_at;
+                        rows.push({ type: 'test', data: m, sortDate: d ? new Date(d).getTime() : 0 });
+                      }
                     }
                     for (const ir of improvementRuns) {
                       const d = ir.started_at || ir.created_at;

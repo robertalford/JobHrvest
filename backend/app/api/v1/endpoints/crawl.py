@@ -310,6 +310,58 @@ async def update_schedule_settings(body: dict):
     return settings_out
 
 
+_PAUSE_REDIS_KEY = "jobharvest:queue_paused"
+_VALID_QUEUE_TYPES = {"discovery", "company_config", "site_config", "job_crawling"}
+
+
+@router.get("/queue/pause-state")
+async def get_pause_state():
+    """Return which queues are paused."""
+    import json
+    result = {qt: False for qt in _VALID_QUEUE_TYPES}
+    try:
+        r = _get_redis()
+        raw = r.hgetall(_PAUSE_REDIS_KEY)
+        r.close()
+        for qt in _VALID_QUEUE_TYPES:
+            result[qt] = raw.get(qt) == "1"
+    except Exception:
+        pass
+    return result
+
+
+@router.post("/queue/pause/{queue_type}")
+async def pause_queue(queue_type: str):
+    """Pause a specific queue type."""
+    if queue_type not in _VALID_QUEUE_TYPES:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Invalid queue type: {queue_type}. Valid: {', '.join(sorted(_VALID_QUEUE_TYPES))}")
+    try:
+        r = _get_redis()
+        r.hset(_PAUSE_REDIS_KEY, queue_type, "1")
+        r.close()
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Redis write failed: {e}")
+    return {"queue_type": queue_type, "paused": True}
+
+
+@router.post("/queue/resume/{queue_type}")
+async def resume_queue(queue_type: str):
+    """Resume a specific queue type."""
+    if queue_type not in _VALID_QUEUE_TYPES:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Invalid queue type: {queue_type}. Valid: {', '.join(sorted(_VALID_QUEUE_TYPES))}")
+    try:
+        r = _get_redis()
+        r.hset(_PAUSE_REDIS_KEY, queue_type, "0")
+        r.close()
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Redis write failed: {e}")
+    return {"queue_type": queue_type, "paused": False}
+
+
 @router.delete("/cancel/{task_id}", status_code=200)
 async def cancel_task(task_id: str):
     from app.tasks.celery_app import celery_app

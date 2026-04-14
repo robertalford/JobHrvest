@@ -6,9 +6,10 @@ _Read this before making any changes._
 
 - **Phase 1 complete** — Foundation is built and committed.
 - GitHub: https://github.com/robertalford/JobHrvest
-- **Champion/challenger ML infrastructure landed (2026-04-14)** — registry, GOLD holdout, promotion gates, drift, ATS quarantine, latency budget, Ollama-backed failure analysis, orchestrator. 33 new tests, full suite 135 green. **Migration 0023 not yet applied**; needs `alembic upgrade head` against running stack.
-- **3-section app redesign landed (2026-04-14)** — landing page at `/` now shows 3 cards (Site Config, Extraction, Discovery). Only Site Config is enabled; the other two are feature-flagged off (`VITE_FEATURE_EXTRACTION`, `VITE_FEATURE_DISCOVERY`). Sidebar is URL-aware and renders only the active section's nav. Legacy top-level URLs redirect into their new section-scoped paths.
+- **Champion/challenger ML infrastructure landed (2026-04-14)** — registry, GOLD holdout, promotion gates, drift, ATS quarantine, latency budget, Ollama-backed failure analysis, orchestrator. 33 new tests, full suite 135 green. Migration applied as `0026_champion_challenger_infra` (renumbered from `0023` to resolve a collision with the pre-existing `0023_app_users`).
+- **3-section app redesign landed (2026-04-14)** — landing page at `/` now shows 3 cards (Site Config, Extraction, Discovery). Only Site Config is enabled; the other two are feature-flagged off (`VITE_FEATURE_EXTRACTION`, `VITE_FEATURE_DISCOVERY`). Sidebar is URL-aware and renders only the active section's nav. Legacy top-level URLs redirect into their new section-scoped paths (including `/test-data` → `/site-config/test-data` and `/models` → `/site-config/models`).
 - **Bulk Domain Processor (standalone Champion run) added** — new page at `/site-config/bulk-process` uploads a CSV of domains and downloads a CSV with selector columns aligned to `TARGET_FIELDS` (title, location_raw, employment_type, salary_raw, department, description, requirements, benefits, date_posted). Selectors are emitted only when model confidence ≥ threshold (default 0.8). Backend endpoint: `POST /api/v1/bulk-domain-process/run`. Orchestration calls into a stub (`_run_champion_for_domain`) that needs wiring to the real `SiteStructureExtractor` path — next increment.
+- **Auto-improve track** — latest iteration updated `v10.4` → `v10.5` with JS-shell endpoint recovery (fetch-json/Workday/Martian), same-page section role extraction, and WordPress entry-title job-post recovery.
 - Next: build a manually-verified GOLD holdout (run `scripts/build_gold_holdout.py`), then re-evaluate the existing TF-IDF classifier on it to establish the *real* baseline before crowning a champion.
 
 ## Champion/Challenger ML Loop
@@ -44,6 +45,7 @@ _Read this before making any changes._
 - ATS extractors: `backend/app/extractors/ats_extractors.py`
 - Career page discoverer: `backend/app/crawlers/career_page_discoverer.py`
 - Job extractor: `backend/app/crawlers/job_extractor.py`
+- Tiered extractor: `backend/app/crawlers/tiered_extractor.py` (3-tier hybrid: ATS templates, heuristic scoring, LLM fallback)
 - Celery tasks: `backend/app/tasks/crawl_tasks.py`
 - Seed data: `backend/scripts/seed.py`
 - DB models: `backend/app/models/`
@@ -55,3 +57,28 @@ _Read this before making any changes._
 - ATS coverage: Greenhouse (many AU tech co's), Lever, Workday, BambooHR, iCIMS, Taleo, SmartRecruiters, Ashby, Jobvite, PageUp
 - Blocked: seek.com.au, jora.com, au.jora.com, jobstreet.com (all variants), jobsdb.com (all variants)
 - Aggregators (link-discovery): Indeed AU, LinkedIn Jobs, Glassdoor AU, CareerOne, Adzuna AU
+
+## Recent Milestones
+
+- v7.1 introduced a dedicated SuccessFactors table extractor (`tr.data-row` + `a.jobTitle-link`) with bounded `startrow` pagination candidate support.
+- v7.1 introduced a dedicated Homerun parser for `<job-list v-bind>` payloads to recover jobs from config-driven pages where DOM listings are sparse.
+- v7.1 tightened title filtering for location/company/generic career headings and improved description cleanup (HTML entity/tag normalization).
+- v7.3 added a precision-focused extraction layer: linked-card/nav URL suppression, stricter link-fallback evidence gating, and Nuxt/Drupal row extraction with bounded page traversal to reduce Type-1 noise while preserving volume on paginated listing boards.
+- v7.4 added dedicated ATS/feed recovery for current regression gaps: PageUp listing-row extraction with bounded pagination, Recruitee `/o/` extraction (including `.NET` titles), and `jobs.json` shell-feed fallback for pages that render jobs only client-side.
+- v7.6 added focused strong-URL recovery for multilingual ATS rows: Teamtailor numeric detail-url row extraction, Bootstrap query-id card extraction, broadened Connx row/app-shell handling, and split-row PageUp link association improvements.
+- v7.7 added row-context quality recovery: metadata-aware row container selection for location backfill, summary-first row description extraction, and description deglue/CTA-tail cleanup for cleaner downstream text.
+- v7.8 added careers-page.com API recovery (`/api/v1.0/c/<slug>/jobs`) and Connx same-page URL repair for `/job/details/...` backfill.
+- v7.9 tightened linked-card precision (date/filter title rejection + `/jobs?...` filter URL rejection) and added numeric-detail fallback for legacy `/jobs/<id>/...` vacancy tables.
+- v9.0 added bounded progressive pagination URL synthesis (`?pp`/`/page/` gaps), multilingual AWSM row-title recovery for `wp-job-openings`, and linked-card title precision updates to reject editorial labels like `Career Guide` while recovering compact structured roles.
+- v10.1 refactored `TieredExtractorV100` into a local-first hybrid extractor with dedicated Breezy/Teamtailor/generic job-grid/WordPress-card/table/JSON-LD extraction, then bounded queue-based LLM fallback.
+- v10.1 reduced timeout risk in the host worker by tuning fallback defaults and parsing Codex JSONL output directly (no temporary output-file roundtrip).
+- v10.2 added split-table card recovery (title row + generic CTA row), numeric query-id detail URL support (`?id=<digits>` and related keys), and Greenhouse table-title cleanup by preferring role nodes over full-anchor text.
+- v10.2 switched v100 title validation to Unicode-aware alphabetic checks, recovering multilingual role titles (for example Thai) while tightening punctuation-variant CTA rejection (`Apply Now!`).
+- v10.3 preserved app-shell JSON scripts in LLM truncation (`application/json`, `__NEXT_DATA__`) and added embedded-state JSON extraction in v100 before fallback.
+- v10.3 added metadata-first local extractors for Bootstrap list-group rows, span-card job layouts, and split heading+CTA cards, lifting field completeness on recoverable pages.
+- v10.4 added canonical URL dedupe (tracking-query stripping) so state+DOM Greenhouse duplicates collapse correctly without changing emitted source URLs.
+- v10.4 improved anchor-only extraction field completeness by pulling location metadata from ancestor row context (for example Hays `p.location` siblings).
+- v10.4 expanded embedded-state parsing to support `absolute_url`/`apply_url` and structured location objects/lists, improving recoverable app-shell job extraction.
+- v10.5 added bounded JS-shell endpoint recovery before LLM fallback in v100 (`fetch('*.json')`, Workday tenant/site shell API probing, Martian client/recruiter endpoint probing) for app-shell pages with empty DOM listings.
+- v10.5 added a same-page heading+metadata extractor for role sections without detail links, emitting deterministic fragment URLs and inline location/job-type metadata.
+- v10.5 added WordPress/Divi `article.post` entry-title extraction for role-slug job feeds and tightened state-JSON ID-fallback acceptance to reject department/team labels.

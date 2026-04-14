@@ -135,6 +135,8 @@ export default function App() {
             <Route path="/domain-import"        element={<LegacyRedirect to="/discovery/domain-import" />} />
             <Route path="/markets"              element={<LegacyRedirect to="/discovery/markets" />} />
             <Route path="/geocoder"             element={<LegacyRedirect to="/discovery/geocoder" />} />
+            <Route path="/test-data"            element={<LegacyRedirect to="/site-config/test-data" />} />
+            <Route path="/models"               element={<LegacyRedirect to="/site-config/models" />} />
           </Route>
         </Routes>
       </BrowserRouter>

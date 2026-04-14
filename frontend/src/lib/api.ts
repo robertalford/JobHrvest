@@ -250,6 +250,8 @@ export const startAutoImprove = () =>
 // Codex Improvement Runs
 export const getImprovementRuns = (params?: Record<string, unknown>) =>
   api.get('/ml-models/improvement-runs', { params }).then(r => r.data);
+export const getRecentTestRuns = (page_size = 20) =>
+  api.get('/ml-models/recent-test-runs', { params: { page_size } }).then(r => r.data);
 export const createMLModelTestRun = (modelId: string) =>
   api.post(`/ml-models/${modelId}/test-runs`).then(r => r.data);
 

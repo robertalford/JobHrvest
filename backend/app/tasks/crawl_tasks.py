@@ -662,9 +662,24 @@ def fix_site_structure(self, career_page_id: str, queue_item_id: str = None):
     _run_async(_run())
 
 
+def _is_queue_paused(queue_type: str) -> bool:
+    """Check Redis pause state for a queue type. Returns True if paused."""
+    try:
+        import redis as redis_lib
+        from app.core.config import settings
+        r = redis_lib.from_url(settings.CELERY_BROKER_URL, decode_responses=True)
+        val = r.hget("jobharvest:queue_paused", queue_type)
+        r.close()
+        return val == "1"
+    except Exception:
+        return False
+
+
 @celery_app.task(name="queue.drain_company_config")
 def drain_company_config():
     """Drain company_config queue: claim batch and run CompanySiteExtractor for each."""
+    if _is_queue_paused("company_config"):
+        return
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
@@ -681,6 +696,8 @@ def drain_company_config():
 @celery_app.task(name="queue.drain_site_config")
 def drain_site_config():
     """Drain site_config queue: claim batch and run SiteStructureExtractor for each."""
+    if _is_queue_paused("site_config"):
+        return
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
@@ -696,11 +713,9 @@ def drain_site_config():
 
 @celery_app.task(name="queue.drain_job_crawling")
 def drain_job_crawling():
-    """Drain job_crawling queue: claim batch and send to Celery.
-
-    Runs every 5 seconds (beat) with batch_size=3050.
-    At 160 workers × 5s/page = 32 pages/s throughput → 50k sites in ~26 min.
-    """
+    """Drain job_crawling queue: claim batch and send to Celery."""
+    if _is_queue_paused("job_crawling"):
+        return
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager
@@ -720,6 +735,8 @@ def drain_job_crawling():
 @celery_app.task(name="queue.drain_discovery")
 def drain_discovery():
     """Drain discovery queue: claim batch and run aggregator harvest for each source."""
+    if _is_queue_paused("discovery"):
+        return
     async def _run():
         from app.db.base import AsyncSessionLocal
         from app.services import queue_manager

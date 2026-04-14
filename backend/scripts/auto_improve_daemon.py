@@ -607,6 +607,15 @@ point matters.
     exit_code = ai.run_codex(prompt, ROOT_DIR, model_id)
     log(f"Codex exited with code {exit_code}")
 
+    if exit_code != 0:
+        log(f"❌ Codex failed with exit code {exit_code} — skipping deployment")
+        if imp_run_id:
+            _update_improvement_run(token, imp_run_id, {
+                "status": "failed",
+                "error_message": f"Codex failed with exit code {exit_code}",
+            })
+        raise RuntimeError(f"Codex failed with exit code {exit_code}")
+
     # Mark this test run as processed (prevent re-processing)
     marker = os.path.join(ROOT_DIR, "storage", f"v10_improved_{test_run_id}")
     with open(marker, "w") as f:
@@ -661,6 +670,37 @@ point matters.
             "output_model_name": f"{model_name} (iter {len(os.listdir(os.path.join(ROOT_DIR, 'storage'))) if False else '?'})",
             "description": description,
         })
+
+    # Wait for the test to complete before returning — prevents the main loop
+    # from immediately starting another Codex run while the test is still running
+    log(f"⏳ Waiting for test to complete before next iteration...")
+    test_wait_start = time.time()
+    test_wait_timeout = 600  # 10 min max wait
+    while time.time() - test_wait_start < test_wait_timeout:
+        time.sleep(POLL_INTERVAL)
+        try:
+            token = get_token()
+            models = get_models(token)
+            for m in models:
+                if m["id"] == model_id:
+                    tr = m.get("latest_test_run")
+                    if tr and tr.get("status") == "completed":
+                        # Report test results
+                        rd = tr.get("results_detail") or {}
+                        summary = rd.get("summary") or {}
+                        ch = summary.get("challenger_composite") or {}
+                        score = ch.get("composite", 0)
+                        sites = ch.get("sites_matched", 0)
+                        total = ch.get("total_sites", 0)
+                        log(f"📊 Test completed: {score:.1f} composite, {sites}/{total} sites matched")
+                        return
+                    elif tr and tr.get("status") == "running":
+                        elapsed = int(time.time() - test_wait_start)
+                        log(f"⏳ Test still running ({elapsed}s elapsed)...")
+                    break
+        except Exception as e:
+            log(f"⚠️ Error checking test status: {e}")
+    log(f"⚠️ Test wait timed out after {test_wait_timeout}s")
 
 
 def run_improvement(model: dict, token: str):
@@ -765,6 +805,15 @@ def run_improvement(model: dict, token: str):
     log(f"🤖 Running Codex ({CODEX_MODEL}) for {next_version}...")
     exit_code = ai.run_codex(prompt, ROOT_DIR, model_id)
     log(f"Codex exited with code {exit_code}")
+
+    if exit_code != 0:
+        log(f"❌ Codex failed with exit code {exit_code} — skipping deployment")
+        if imp_run_id:
+            _update_improvement_run(token, imp_run_id, {
+                "status": "failed",
+                "error_message": f"Codex failed with exit code {exit_code}",
+            })
+        raise RuntimeError(f"Codex failed with exit code {exit_code}")
 
     # Post-Codex deployment
     extractor_file = os.path.join(PROJECT_DIR, "app", "crawlers",

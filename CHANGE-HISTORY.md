@@ -103,6 +103,174 @@ Tests (BDD/TDD per CLAUDE.md):
 
 ---
 
+## 2026-04-09 (auto-improve iteration v10.5)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/446eba16-c4a7-409c-8a23-baa1f14d138e_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v100.py`
+  - Added shell endpoint recovery before LLM fallback for JS-heavy pages:
+    - `fetch("*.json")` endpoint hint extraction + JSON payload parsing
+    - Workday shell recovery via `window.workday` (`tenant`, `siteId`) and `/wday/cxs/{tenant}/{siteId}/jobs` probing
+    - Martian/MyRecruitmentPlus shell recovery via `clientCode`/`recruiterId` endpoint probing
+  - Added same-page section role extractor for heading+metadata blocks without detail links, with synthetic per-role fragment URLs and inline location/job-type parsing.
+  - Added WordPress/Divi post-feed role extractor (`article.post` + `entry-title` links) for role-slug job pages outside strict `/job|/career` paths.
+  - Expanded detail-query URL recognition to include `jobAdId`, `adId`, and `career_job_req_id`.
+  - Tightened state-JSON filtering to reject department/team labels when only weak ID fallback evidence exists.
+- `backend/tests/unit/test_tiered_extractor_v100.py`
+  - Added tests for same-page section extraction (Prudence context), WordPress entry-title extraction (Tom Orange context), and shell `fetch('/jobs.json')` recovery with mocked JSON payload.
+
+**Validation:**
+- `cd backend && pytest -q tests/unit/test_tiered_extractor_v100.py`
+  - Result: `17 passed`
+
+## 2026-04-08 (auto-improve iteration v9.0)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/b032d324-5168-438b-aa5a-0e6b6088f9db_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v90.py` — NEW FILE. Added focused v9.0 improvements on top of v8.9:
+  - Progressive pagination URL synthesis for sparse query/path pagination links (fills missing intermediate pages like `?pp=6` and `/page/3`) with bounded breadth.
+  - Multilingual AWSM title recovery for `wp-job-openings` rows under strict non-role phrase rejection.
+  - Linked-card precision/recall update: explicit editorial-title rejection (`Career Guide` class labels), plus compact structured-role fallback for strong job-path cards.
+- `backend/app/crawlers/career_page_finder_v90.py` — NEW FILE. Finder parity wrapper over v8.9.
+- `backend/app/api/v1/endpoints/ml_models.py` — Updated `_FINDER_MAP` with `90: 90`.
+- `backend/app/tasks/ml_tasks.py` — Updated `_FINDER_MAP` with `90: 90`.
+
+Tests:
+- `backend/tests/unit/test_tiered_extractor_v90.py` — NEW FILE. Added tests for progressive pagination synthesis, AWSM multilingual recovery, editorial linked-card rejection, and compact structured-role recovery.
+
+Records:
+- `storage/auto_improve_memory.json` — Added v9.0 iteration entry with root causes and fixes.
+
+Validation:
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v90.py -q --tb=short` (6 passed)
+- `python -m pytest backend/tests/test_extractor_smoke.py -q --tb=short` (6 passed, 1 warning)
+
+## 2026-04-08 (auto-improve iteration v7.6)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/086d1925-b59e-4ce3-adb6-27cdf7f73713_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v76.py` — NEW FILE. Added focused v7.6 improvements on top of v7.5:
+  - Teamtailor row extractor for strong numeric detail URLs (`/jobs/<id>-slug`) with multilingual short-title acceptance under strict nav/location guards.
+  - Bootstrap query-id card extractor for repeated `col-lg-4.mb-4` career cards using unique `?id=` detail URLs.
+  - Pre-super high-confidence routing so Teamtailor/query-id ATS sets are finalized directly before generic fallback chains.
+  - PageUp split-row link pairing improvements to connect `h3.list-title` nodes with sibling-column detail links.
+  - Expanded Connx parsing for alternate GridTable row markup (`a.GridTable__row`, generic child rows, table rows) plus bounded connx app-shell endpoint probing from script hints.
+  - Description cleanup extension to strip skip-link boilerplate (`Skip to primary navigation`, `Skip to main content`, `Back to all positions`).
+- `backend/app/crawlers/career_page_finder_v76.py` — NEW FILE. Finder parity wrapper over v7.5.
+- `backend/app/api/v1/endpoints/ml_models.py` — Updated `_FINDER_MAP` with `76: 76`.
+
+Tests:
+- `backend/tests/unit/test_tiered_extractor_v76.py` — NEW FILE. Added tests for PageUp split-row pairing, Teamtailor multilingual title recovery, query-id Bootstrap cards, Connx anchor-row parsing, connx shell detection, and description cleanup.
+
+Records:
+- `storage/auto_improve_memory.json` — Added v7.6 iteration entry with root causes, applied fixes, and local validation status.
+
+Validation:
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v76.py -q --tb=short` (6 passed)
+- `python -m pytest backend/tests/test_extractor_smoke.py -q --tb=short` (6 passed, 1 warning)
+
+---
+
+## 2026-04-07 (auto-improve iteration v7.1)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/711dd109-da39-495b-9e4e-90a4e22d0577_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v71.py` — NEW FILE. Implemented precision-reset strategy on top of v6.9 with three focused capabilities: (1) stricter linked-card title validation to reject location/company/generic-career headings while keeping compact strong-detail role fallback; (2) dedicated SuccessFactors/J2W `tr.data-row` + `a.jobTitle-link` extraction with bounded `startrow` pagination follow-up planning; (3) dedicated Homerun `job-list` `v-bind` state extraction for config-driven pages. Added bounded description cleanup (HTML entity/tag normalization) for improved description readability.
+- `backend/app/crawlers/career_page_finder_v71.py` — NEW FILE. Version-matched finder wrapper with no discovery logic changes (inherits v7.0 behavior).
+- `backend/app/api/v1/endpoints/ml_models.py` — Updated `_FINDER_MAP` with `71: 71` for version-matched finder selection.
+
+Tests:
+- `backend/tests/unit/test_tiered_extractor_v71.py` — NEW FILE. Added focused tests for v7.1 title guards, linked-card location rejection, SuccessFactors row/pagination parsing, and Homerun state payload extraction.
+
+Records:
+- `storage/auto_improve_memory.json` — Added v7.1 iteration entry with root-cause analysis and fixes applied.
+
+Validation:
+- `pytest` is unavailable in this environment (`No module named pytest`), so `python -m pytest` could not be executed.
+- Ran direct smoke checks via Python against the v7.1 context HTML files:
+  - Melia SuccessFactors page: extracted 23 jobs from current page + detected forward pagination (`startrow=275,300,325,...`).
+  - PLN page: linked-card extraction recovered 10 vacancy titles and rejected generic `Peluang Karir` labels.
+  - Resn Homerun page: state parser recovered `Creative Director` and `Expressions of Interest - Amsterdam or Wellington`.
+  - Portico page: linked-card extraction removed location-only title false positives (for example `USA, New York`).
+
+---
+
+## 2026-04-07 (auto-improve iteration v6.9)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/1d88643d-06e4-410a-b91b-1904c103b47a_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v69.py` — NEW FILE. Added two focused changes on top of v6.8: (1) Jobs2Web endpoint re-ranking so same-host `/search/?q=&skillsSearch=false` variants are attempted within the existing bounded probe window; (2) title validation guard rejecting generic vacancy headings (`Job Vacancies`, `Current Vacancies`, `Vacancies`) that can leak from nav menus.
+- `backend/app/crawlers/career_page_finder_v69.py` — NEW FILE. Version-matched finder with no discovery logic changes (inherits v6.8 behavior).
+- `backend/app/api/v1/endpoints/ml_models.py` — Updated `_FINDER_MAP` with `69: 69` for version-matched finder selection.
+
+Tests:
+- `backend/tests/unit/test_tiered_extractor_v69.py` — NEW FILE. Added tests for (1) Jobs2Web endpoint ordering (same-host search + API jobsearch both present in top probe set) and (2) vacancy-heading false-positive rejection.
+
+Records:
+- `storage/auto_improve_memory.json` — Added v6.9 iteration entry and updated learning lists with Jobs2Web probe-order guidance.
+
+Validation:
+- Environment does not have `pytest` installed (`python -m pytest` fails with `No module named pytest`), so full unit suite could not be executed here.
+- Performed direct Python sanity checks by importing `TieredExtractorV69`/`CareerPageFinderV69` and verifying endpoint ordering + title guards on local context snippets.
+
+---
+
+## 2026-04-07 (auto-improve iteration v6.7)
+
+**Prompt:**
+- Read and follow `storage/auto_improve_logs/da71a4d0-197b-4083-8958-7d1d6da890f2_prompt.md`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor_v67.py` — NEW FILE. Added linked-card extraction for `/job/` detail anchors where role titles are in inner heading/large-text nodes; added bounded same-host pagination follow-up (up to 2 pages) for card boards; added explicit generic title rejection for `Job Board`/`How It Works` in title validation.
+- `backend/app/crawlers/career_page_finder_v67.py` — NEW FILE. Added resilient hint URL recovery: if normal hint fetch fails, retry hint and scheme alternate with `verify=False` while keeping listing-quality gating.
+- `backend/app/api/v1/endpoints/ml_models.py` — Updated `_FINDER_MAP` with `67: 67` for version-matched finder selection.
+- `storage/auto_improve_memory.json` — Added v6.7 iteration entry plus new "what worked / what didn't" learnings from this run.
+
+Validation:
+- Syntax-checked changed Python files via AST parsing (`AST_OK`).
+- Local context replay check on `failure_2_fredrecruitment_co_nz.html` confirms linked-card extractor now captures 9 first-page role titles and identifies pagination URLs for page 2/3.
+
+---
+
+## 2026-04-01 (Tiered Extraction Engine)
+
+**Prompt:**
+- Build the complete 3-tier extraction system at `backend/app/crawlers/tiered_extractor.py`
+
+**Changes:**
+
+Backend:
+- `backend/app/crawlers/tiered_extractor.py` — NEW FILE. Complete 3-tier hybrid extraction engine:
+  - Tier 1: ATS template library with hardcoded selectors for 14 platforms (Lever, Greenhouse, JazzHR, BambooHR, Workday, iCIMS, SmartRecruiters, Taleo, LiveHire, ApplyNow, PageUp, Jobvite, Teamtailor, Ashby). Detects ATS from URL, applies CSS/XPath selectors per platform.
+  - Tier 2: Heuristic structural analysis using weighted scoring (job-class patterns, repeating child detection, URL path matching). Extracts title, link, location, salary, employment type from highest-scoring container.
+  - Tier 3: LLM-assisted extraction — placeholder returning None, to be wired into existing Ollama extractor later.
+  - Exports `TieredExtractor` class with `async def extract(career_page, company, html) -> list[dict]`.
+  - Uses lxml + cssselect for parsing (both CSS selectors and XPath). AU-focused location/salary regex patterns.
+
+---
+
 ## 2026-03-20 (session 12 — Performance optimisations, menu restructure, unified Overview page)
 
 **Prompts:**
@@ -415,3 +583,202 @@ Loading UX fix:
   - Seed script: AU market config, 57 Australian seed companies, aggregator sources, blocked domains
   - React frontend: Dashboard, Companies, Career Pages, Jobs, Crawl Monitor, Analytics, Settings
   - `.env.example`, `Makefile`, `README.md`, `.gitignore`
+
+---
+
+## 2026-04-08 (auto-improve v7.3)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/e537c598-edef-4d04-aa08-cdf7ff6eeca9_prompt.md`.
+
+**Changes:**
+- Added `backend/app/crawlers/tiered_extractor_v73.py` (built from v6.9/v7.2 patterns) with:
+  - Nav-aware linked-card filtering to reject generic listing/nav/company-root links unless strong job-path evidence exists.
+  - Stricter `tier2_links` post-filtering (requires URL or row-context evidence) to suppress promotional/event false positives.
+  - Dedicated Nuxt/Drupal job-row extractor (`ats_nuxt_job_rows_v73`) plus bounded same-host `?page=` pagination expansion.
+  - Bounded Algolia/Nuxt shell fallback (index discovery + validated hit parsing) for job shells with empty SSR DOM.
+  - Fast-path enrichment guardrail: skip very large sets (`>25`) to reduce timeout churn.
+- Added `backend/app/crawlers/career_page_finder_v73.py` (finder parity wrapper over v7.2).
+- Updated finder mapping in `backend/app/api/v1/endpoints/ml_models.py` (`73 -> 73`).
+- Added tests in `backend/tests/unit/test_tiered_extractor_v73.py` for nav filtering, stricter link fallback, and Nuxt row extraction.
+- Updated `storage/auto_improve_memory.json` with v7.3 iteration entry.
+
+**Validation:**
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v73.py -q --tb=short` (4 passed)
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v72.py backend/tests/test_extractor_smoke.py -v --tb=short` (10 passed)
+
+---
+
+## 2026-04-08 (auto-improve v7.4)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/e0bd9938-004c-4758-86ce-44194cd0f8ef_prompt.md`.
+
+**Changes:**
+- Added `backend/app/crawlers/tiered_extractor_v74.py` (built from v7.3 baseline) with:
+  - Dedicated PageUp ATS extraction for `careers.pageuppeople.com` listing rows (`h3.list-title`) plus bounded same-host pagination follow-up from `a.more-link`/`page=` URLs.
+  - Dedicated Recruitee extractor for `/o/<slug>` offer links, including location capture from row context and strong-path acceptance for dotted titles like `.NET Developer`.
+  - Expanded strong-detail URL detection to include `/o/<slug>` paths for safer linked-card acceptance on Recruitee-style boards.
+  - Bounded JSON-feed fallback for JS shells: detects inline `fetch(...jobs*.json)` paths, fetches same-host feed payloads, and converts structured items into validated jobs with cleaned description/location fields.
+  - Added login-label suppression (`Associate Login`, `Candidate Login`, `Sign in`/`Log in`) to reduce Type-1 title noise on link-heavy boards.
+- Added `backend/app/crawlers/career_page_finder_v74.py` as version-matched finder parity wrapper.
+- Updated finder mapping in `backend/app/api/v1/endpoints/ml_models.py` (`74 -> 74`).
+- Added unit tests in `backend/tests/unit/test_tiered_extractor_v74.py` for Recruitee extraction, PageUp parsing/pagination capture, and JSON-feed item conversion.
+- Updated `storage/auto_improve_memory.json` with the v7.4 iteration entry.
+
+**Validation:**
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v74.py -q` (3 passed)
+- `python -m pytest backend/tests/test_extractor_smoke.py -v --tb=short` (6 passed)
+
+---
+
+## 2026-04-08 (auto-improve v7.7)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/2eb14a6f-5961-40c6-9769-4e1cc19712c2_prompt.md`.
+
+**Changes:**
+- Added `backend/app/crawlers/tiered_extractor_v77.py` (built from v7.6 baseline) with:
+  - Score-based ancestor selection in `_find_row_container_v73` so backfill prefers metadata-bearing row containers (location/time/salary) instead of shallow wrappers that only contain title text.
+  - Cleaner row-description extraction in `_extract_row_description_v73` by preferring semantic summary nodes (`<p>/<li>`) and trimming CTA tails.
+  - Description cleanup extension to split glued lower→upper text boundaries and strip listing-prefix/CTA-tail artifacts (e.g. `...Apply`, trailing `Read More`).
+- Added `backend/app/crawlers/career_page_finder_v77.py` as version-parity finder wrapper over v7.6 discovery behavior.
+- Updated finder mapping in `backend/app/api/v1/endpoints/ml_models.py` (`77 -> 77`).
+- Added unit tests in `backend/tests/unit/test_tiered_extractor_v77.py` for metadata-row location backfill, row-summary description extraction, and description deglue/CTA-tail cleanup.
+- Updated `storage/auto_improve_memory.json` with the v7.7 iteration entry.
+
+**Validation:**
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v77.py -q --tb=short` (3 passed)
+- `python -m pytest backend/tests/test_extractor_smoke.py -v --tb=short` (6 passed)
+
+---
+
+## 2026-04-08 (auto-improve v7.9)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/7e3f9243-a2f5-4c49-bc66-60cb93d54138_prompt.md`.
+
+**Changes:**
+- Added `backend/app/crawlers/tiered_extractor_v79.py` (built from v7.8 baseline) with:
+  - Linked-card precision tightening in title validation to reject date-only and listing-filter labels (for example `Apr 7, 2026`, `Job Index`, `Jobs near ...`).
+  - URL-level non-job gating for query-driven listing/filter pages (`/jobs?...`) unless explicit detail-ID keys are present.
+  - Numeric-detail fallback for legacy `/jobs/<id>/...` links to recover valid roles missed by strict noun-only title gates.
+  - Large numeric-table guard that suppresses non-numeric editorial/sidebar links when a page is clearly a high-volume numeric vacancy listing.
+- Added `backend/app/crawlers/career_page_finder_v79.py` as version-parity finder wrapper over v7.8 discovery behavior.
+- Updated finder mapping in `backend/app/api/v1/endpoints/ml_models.py` (`79 -> 79`).
+- Added unit tests in `backend/tests/unit/test_tiered_extractor_v79.py` for date/listing title rejection, listing-query URL rejection, same-URL date-title suppression, and numeric-detail fallback recovery.
+- Updated `storage/auto_improve_memory.json` with the v7.9 iteration entry and new lessons.
+
+**Validation:**
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v79.py -q` (4 passed)
+- `python -m pytest backend/tests/unit/test_tiered_extractor_v78.py backend/tests/unit/test_tiered_extractor_v76.py backend/tests/unit/test_tiered_extractor_v75.py -q` (15 passed)
+- `python -m pytest backend/tests/test_extractor_smoke.py -v --tb=short` (6 passed)
+
+---
+
+## 2026-04-09 (auto-improve v10.1)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/446eba16-c4a7-409c-8a23-baa1f14d138e_prompt.md`.
+
+**Changes:**
+- Refactored `backend/app/crawlers/tiered_extractor_v100.py` from LLM-only behavior to a hybrid local-first extractor:
+  - Added deterministic local extraction pipeline (`_extract_local_jobs`) that runs before LLM fallback.
+  - Added focused extractors for recurring failure patterns in provided v10 context:
+    - Breezy rows (`li.position` + `/p/<id>`)
+    - Teamtailor rows (`li.w-full` + `/jobs/<numeric-id>-slug`)
+    - Generic `job__name` card grids (`/career/openings/...`)
+    - WordPress career cards (`div.col-md-6` + `/career/<slug>`)
+    - Generic table row vacancies and strong detail-anchor fallback
+    - JSON-LD `JobPosting` parsing
+  - Added title/url validation guardrails and dedupe scoring to suppress generic nav/filter labels.
+  - Reduced LLM fallback wait budget (`RESULT_TIMEOUT=45`) and handled unavailable queue paths gracefully.
+  - Updated class inheritance to `TieredExtractorV16` to satisfy extractor smoke expectations.
+- Updated `backend/scripts/v10_llm_worker.py`:
+  - Reduced fallback timeout/concurrency defaults (`V10_CODEX_TIMEOUT=40`, workers=2, faster poll interval).
+  - Removed output-file roundtrip workflow; now parses Codex `--json` events directly for assistant output.
+- Rewrote `storage/v10_extraction_prompt.md` to be stricter and faster:
+  - JSON-only output contract, no fabrication, explicit non-job label rejection.
+  - Priority strategy for structured data + repeated rows + strong detail URLs.
+  - ATS hints for Breezy/Teamtailor/Workday/WordPress layouts.
+- Added new regression tests in `backend/tests/unit/test_tiered_extractor_v100.py` using provided v10 failure context snapshots.
+- Updated `storage/auto_improve_memory.json` with a `v10.1` iteration record.
+
+**Validation:**
+- `pytest -q backend/tests/unit/test_tiered_extractor_v100.py` (4 passed)
+- `pytest -q backend/tests/unit/test_tiered_extractor_v100.py backend/tests/test_extractor_smoke.py` (10 passed)
+
+---
+
+## 2026-04-09 (auto-improve v10.2)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/446eba16-c4a7-409c-8a23-baa1f14d138e_prompt.md`.
+
+**Changes:**
+- Updated `backend/app/crawlers/tiered_extractor_v100.py` to improve deterministic local extraction quality and multilingual coverage:
+  - Added split-table card extraction (`_extract_split_table_cards`) for layouts where role title and CTA link are on different rows (for example `h3` role + `Selengkapnya` link patterns).
+  - Expanded detail URL validation to accept numeric query-id job links (`id`, `jobid`, `vacancyid`, `requisitionid`, etc.) and multilingual slug routes while still rejecting listing/index/search endpoints.
+  - Improved table-row title parsing to prefer row-local role nodes (`body--medium`, heading tags) before anchor-text fallback, fixing Greenhouse title-location glue.
+  - Tightened CTA title rejection (`Apply Now!` variants) and switched to Unicode-aware title validation so non-Latin role titles are retained.
+- Added v10 regression tests in `backend/tests/unit/test_tiered_extractor_v100.py` for:
+  - Greenhouse title cleanup (`Automation Test Engineer` without location glue),
+  - Split-table query-id recovery (`simap.afgindo.com` pattern),
+  - Multilingual Thai title acceptance (`careerlink.co.th` pattern).
+- Updated `storage/auto_improve_memory.json` with a `v10.2` iteration entry and result notes.
+
+**Validation:**
+- `PYTHONPATH=backend pytest -q backend/tests/unit/test_tiered_extractor_v100.py -k "greenhouse_titles_without_location_glue or generic_card_title_with_query_detail_link or multilingual_job_titles"` (3 passed)
+- `PYTHONPATH=backend pytest -q backend/tests/unit/test_tiered_extractor_v100.py` (7 passed)
+- Context spot-check (`v10_latest` local extraction counts): `simap.afgindo.com` 0 -> 9, `careerlink.co.th` 47 -> 50, `job-boards.greenhouse.io` titles normalized.
+
+---
+
+## 2026-04-09 (auto-improve v10.3)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/446eba16-c4a7-409c-8a23-baa1f14d138e_prompt.md`.
+
+**Changes:**
+- Updated `backend/app/crawlers/tiered_extractor_v100.py` to improve recoverable v10 failure categories:
+  - Preserved JSON state scripts during LLM truncation (`application/json`, `ld+json`, `__NEXT_DATA__/__NUXT__/__INITIAL_STATE__`) instead of stripping all scripts.
+  - Added embedded state extraction (`_extract_embedded_state_jobs`) for deterministic job recovery from inline JSON payloads.
+  - Added generic local extractors for:
+    - Bootstrap/list-group rows with heading anchors + metadata (`_extract_list_group_rows`)
+    - Span-metadata card layouts (`_extract_span_metadata_cards`)
+    - Split heading+CTA cards (Elementor/card wrappers where title and link are in separate nodes) (`_extract_heading_cta_cards`)
+  - Added apply-context URL handling and bounded generic apply-page dedupe to reduce type-1 inflation from repeated shared CTA URLs.
+  - Added non-job title rejection for `We are hiring` style labels.
+- Updated `storage/v10_extraction_prompt.md` to explicitly parse app-shell JSON state and split title+CTA card layouts and to include row metadata when present.
+- Expanded `backend/tests/unit/test_tiered_extractor_v100.py` with 4 new regression tests:
+  - Elementor shared-CTA heading-card recovery (`itconnexion`)
+  - Metadata extraction from Bootstrap list rows (`careerlink`)
+  - Metadata extraction from span-card layouts (`digimonk`)
+  - `_truncate_html` JSON-script preservation for `__NEXT_DATA__`
+
+**Validation:**
+- `PYTHONPATH=backend pytest -q backend/tests/unit/test_tiered_extractor_v100.py` (11 passed)
+- Local context spot-check (`storage/auto_improve_context/v10_latest`):
+  - `failure_6_itconnexion_com.html`: 0 -> 4
+  - `failure_7_careerlink_co_th.html`: 50 with metadata uplift (location/description now populated across rows)
+  - `failure_8_digimonk_in.html`: 5 with metadata uplift (location/description populated)
+
+---
+
+## 2026-04-09 (auto-improve v10.4)
+
+**Prompt:** Read and follow instructions in `storage/auto_improve_logs/446eba16-c4a7-409c-8a23-baa1f14d138e_prompt.md`.
+
+**Changes:**
+- Updated `backend/app/crawlers/tiered_extractor_v100.py` to improve quality-adjusted extraction on recoverable v10 failure categories:
+  - Added canonical URL dedupe keying that strips tracking query params (`gh_src`, `utm_*`) so state+DOM duplicates collapse without changing emitted `source_url`.
+  - Extended embedded-state parsing to accept `absolute_url`/`apply_url` keys and structured location objects/lists (`name`, `city/region/country`, nested `address`).
+  - Tightened anchor fallback usage by lowering trigger from `<5` to `<3` local jobs to avoid noisy duplicate inflation when deterministic extractors already have adequate coverage.
+  - Improved anchor title quality by preferring semantic title nodes (`.body--medium`, heading tags) before full-anchor fallback.
+  - Added ancestor-aware row metadata recovery for anchor extraction and widened table-row location capture (`body__secondary`, `body--metadata`) to improve field completeness.
+- Expanded `backend/tests/unit/test_tiered_extractor_v100.py` with new regression tests for:
+  - Greenhouse duplicate suppression + location retention (`failure_8_job_boards_greenhouse_io`)
+  - Anchor-row location recovery on Hays-style listings (`failure_6_hays_com_my`)
+  - Embedded-state `absolute_url` + structured location parsing.
+- Updated `storage/auto_improve_memory.json` with `v10.4` iteration notes and new lessons.
+
+**Validation:**
+- `PYTHONPATH=backend python -m pytest backend/tests/unit/test_tiered_extractor_v100.py -q` (14 passed)
+- `PYTHONPATH=backend python -m pytest backend/tests/test_extractor_smoke.py -q` (6 passed)
+- Local context spot-check (`storage/auto_improve_context/v10_latest`):
+  - `failure_8_job_boards_greenhouse_io.html`: 6 -> 3 jobs, locations now populated.
+  - `failure_6_hays_com_my.html`: 10 jobs retained, location coverage 0/10 -> 10/10.
+  - `failure_1_job_boards_greenhouse_io.html`: 10 jobs retained, location coverage 0/10 -> 10/10.

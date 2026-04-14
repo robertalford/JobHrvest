@@ -371,6 +371,37 @@ async def list_improvement_runs(
     }
 
 
+@router.get("/recent-test-runs")
+async def recent_test_runs(
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the most recent test runs across ALL models, for the unified timeline."""
+    runs = list(await db.scalars(
+        select(MLModelTestRun)
+        .order_by(MLModelTestRun.created_at.desc())
+        .limit(page_size)
+    ))
+    # Attach model info to each run
+    model_ids = list({r.model_id for r in runs})
+    models_by_id = {}
+    if model_ids:
+        models = list(await db.scalars(select(MLModel).where(MLModel.id.in_(model_ids))))
+        models_by_id = {m.id: m for m in models}
+
+    items = []
+    for r in runs:
+        m = models_by_id.get(r.model_id)
+        item = _serialize_test_run(r, compact=True)
+        item["model_id"] = str(r.model_id)
+        item["model_name"] = m.name if m else "Unknown"
+        item["model_description"] = m.description if m else None
+        item["model_status"] = m.status if m else None
+        items.append(item)
+
+    return {"items": items}
+
+
 @router.post("/improvement-runs")
 async def create_improvement_run(
     body: ImprovementRunCreate,

@@ -19,9 +19,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 QUEUE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "storage", "v10_queue")
 CODEX_MODEL = os.environ.get("V10_CODEX_MODEL", "gpt-5.3-codex")
-CODEX_TIMEOUT = int(os.environ.get("V10_CODEX_TIMEOUT", "120"))
-MAX_WORKERS = int(os.environ.get("V10_MAX_WORKERS", "4"))
-POLL_INTERVAL = 0.5  # seconds
+CODEX_TIMEOUT = int(os.environ.get("V10_CODEX_TIMEOUT", "40"))
+MAX_WORKERS = int(os.environ.get("V10_MAX_WORKERS", "2"))
+POLL_INTERVAL = 0.25  # seconds
 
 
 def log(msg: str):
@@ -38,19 +38,12 @@ def process_request(prompt_file: str):
         with open(prompt_file) as f:
             prompt = f.read()
 
-        # Write prompt to a temp file for Codex
-        tmp_prompt = f"/tmp/v10_{req_id}.md"
-        with open(tmp_prompt, "w") as f:
-            f.write(prompt)
-
-        # Run Codex with --json to get JSONL events
+        # Run Codex with JSONL events and parse assistant text directly.
         cmd = [
             "codex", "exec",
-            "--full-auto",
             "--json",
             "-m", CODEX_MODEL,
-            f"Read {tmp_prompt} and follow the instructions exactly. "
-            f"Write the JSON result to {tmp_prompt.replace('.md', '.out')}",
+            prompt,
         ]
 
         log(f"🔧 {req_id}: running codex exec -m {CODEX_MODEL}")
@@ -65,34 +58,9 @@ def process_request(prompt_file: str):
         if result.returncode != 0:
             log(f"🔧 {req_id}: stderr: {result.stderr[:300]}")
 
-        # Try to read the output file Codex was asked to create
-        out_file = tmp_prompt.replace('.md', '.out')
-        output = ""
-        if os.path.exists(out_file):
-            with open(out_file) as f:
-                output = f.read().strip()
-            log(f"🔧 {req_id}: read output file ({len(output)} bytes)")
-            try:
-                os.unlink(out_file)
-            except Exception:
-                pass
-        else:
-            log(f"🔧 {req_id}: no output file at {out_file}")
-
-        # If no output file, try to extract from JSONL events (agent messages)
-        if not output and result.stdout:
-            for line in result.stdout.strip().split("\n"):
-                try:
-                    evt = json.loads(line)
-                    if evt.get("type") == "item.completed":
-                        item = evt.get("item", {})
-                        for content in item.get("content", []):
-                            text = content.get("text", "")
-                            if '"jobs"' in text:
-                                output = text
-                                break
-                except Exception:
-                    continue
+        output = _extract_text_from_jsonl(result.stdout)
+        if not output:
+            output = result.stdout or result.stderr or ""
 
         json_output = _extract_json(output)
 
@@ -100,12 +68,6 @@ def process_request(prompt_file: str):
             f.write(json_output)
 
         log(f"✅ {req_id}: processed ({len(json_output)} bytes)")
-
-        # Cleanup temp
-        try:
-            os.unlink(tmp_prompt)
-        except Exception:
-            pass
 
     except subprocess.TimeoutExpired:
         log(f"⏰ {req_id}: timeout ({CODEX_TIMEOUT}s)")
@@ -150,6 +112,37 @@ def _extract_json(output: str) -> str:
 
     # Last resort — return the raw output and let the extractor try to parse it
     return output
+
+
+def _extract_text_from_jsonl(stdout: str) -> str:
+    """Extract the latest assistant text payload from codex --json events."""
+    if not stdout:
+        return ""
+
+    latest_text = ""
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except Exception:
+            continue
+
+        # Most messages arrive as completed items with content blocks.
+        if evt.get("type") == "item.completed":
+            item = evt.get("item", {})
+            for content in item.get("content", []):
+                text = content.get("text", "")
+                if text:
+                    latest_text = text
+        # Fallback for alternative event shapes.
+        elif evt.get("type") == "response.completed":
+            text = evt.get("response", {}).get("output_text", "")
+            if text:
+                latest_text = text
+
+    return latest_text
 
 
 def main():

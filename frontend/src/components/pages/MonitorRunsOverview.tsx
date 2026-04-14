@@ -4,12 +4,12 @@
  */
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getQueueStats, getJobCrawlBreakdown, triggerRun, getLiveTimeline } from '../../lib/api';
+import { getQueueStats, getJobCrawlBreakdown, triggerRun, getLiveTimeline, getQueuePauseState, pauseQueue, resumeQueue } from '../../lib/api';
 import { Link } from 'react-router-dom';
 import {
   Globe, Building2, Search, Activity, Briefcase,
-  Clock, Loader2, CheckCircle, XCircle, Play, ArrowRight,
-  FileX, Ban, Copy, CalendarOff, ShieldAlert, TrendingUp,
+  Clock, Loader2, CheckCircle, XCircle, Play, Pause, ArrowRight,
+  FileX, Ban, Copy, CalendarOff, ShieldAlert, TrendingUp, AlertCircle,
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -116,11 +116,15 @@ function StatPill({ value, label, colorClass }: { value: number; label: string; 
   );
 }
 
-function QueueCard({ qt, stats, onTrigger, isTriggering }: {
+function QueueCard({ qt, stats, onTrigger, isTriggering, isPaused, onPause, onResume, isPauseToggling }: {
   qt: QueueTypeDef;
   stats: Record<string, number> | undefined;
   onTrigger: () => void;
   isTriggering: boolean;
+  isPaused: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  isPauseToggling: boolean;
 }) {
   const Icon = qt.icon;
   const pending    = stats?.pending    ?? 0;
@@ -130,9 +134,11 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
   const total      = pending + processing + done + failed;
   const completedPct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
   const failPct      = total > 0 ? Math.round((failed / total) * 100) : 0;
+  const failRate     = (done + failed) > 0 ? Math.round((failed / (done + failed)) * 100) : 0;
+  const isStalled    = pending > 0 && processing === 0 && !isPaused;
 
   return (
-    <div className="card p-5 flex flex-col gap-4">
+    <div className={`card p-5 flex flex-col gap-4 ${isPaused ? 'opacity-60 border-dashed' : ''} ${failed > 0 && failRate > 20 ? 'ring-1 ring-red-200' : ''}`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
@@ -140,26 +146,68 @@ function QueueCard({ qt, stats, onTrigger, isTriggering }: {
             <Icon className="w-4 h-4" style={{ color: qt.iconColor }} />
           </div>
           <div>
-            <div className="font-semibold text-gray-900">{qt.label}</div>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-gray-900">{qt.label}</span>
+              {isPaused && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700">
+                  <Pause className="w-2.5 h-2.5" /> Paused
+                </span>
+              )}
+              {isStalled && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-orange-100 text-orange-700 animate-pulse">
+                  <AlertCircle className="w-2.5 h-2.5" /> Stalled
+                </span>
+              )}
+              {failRate > 20 && (done + failed) > 10 && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-red-100 text-red-700">
+                  <XCircle className="w-2.5 h-2.5" /> {failRate}% failing
+                </span>
+              )}
+            </div>
             <div className="text-xs text-gray-400">{qt.description}</div>
           </div>
         </div>
-        <button
-          onClick={onTrigger}
-          disabled={isTriggering}
-          className="btn-secondary text-xs flex items-center gap-1 px-2 py-1"
-          title="Trigger run now"
-        >
-          {isTriggering ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-          Run
-        </button>
+        <div className="flex items-center gap-1.5">
+          {isPaused ? (
+            <button
+              onClick={onResume}
+              disabled={isPauseToggling}
+              className="btn-primary text-xs flex items-center gap-1 px-3 py-1.5"
+              title="Start processing"
+            >
+              {isPauseToggling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+              Start
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={onTrigger}
+                disabled={isTriggering}
+                className="btn-secondary text-xs flex items-center gap-1 px-2 py-1"
+                title="Trigger a new run"
+              >
+                {isTriggering ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                Run
+              </button>
+              <button
+                onClick={onPause}
+                disabled={isPauseToggling}
+                className="btn-secondary text-xs flex items-center gap-1 px-2 py-1 text-amber-600 hover:bg-amber-50"
+                title="Pause processing"
+              >
+                {isPauseToggling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Pause className="w-3 h-3" />}
+                Pause
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-4 gap-2 py-3 border-y border-gray-100">
         <StatPill value={pending}    label="Pending"    colorClass="text-amber-600" />
         <StatPill value={processing} label="Processing" colorClass="text-blue-600" />
         <StatPill value={done}       label="Done"       colorClass="text-green-600" />
-        <StatPill value={failed}     label="Failed"     colorClass="text-red-500" />
+        <StatPill value={failed}     label="Failed"     colorClass={failed > 0 ? "text-red-500 font-bold" : "text-red-500"} />
       </div>
 
       <div>
@@ -345,6 +393,13 @@ export function MonitorRunsOverview() {
     return () => clearInterval(timer);
   }, []);
 
+  // Pause state
+  const { data: pauseState } = useQuery<Record<string, boolean>>({
+    queryKey: ['queue-pause-state'],
+    queryFn: () => getQueuePauseState().catch(() => ({})),
+    refetchInterval: 5000,
+  });
+
   const triggerMuts = Object.fromEntries(
     QUEUE_TYPES.map(qt => [
       qt.runType,
@@ -354,6 +409,28 @@ export function MonitorRunsOverview() {
         onSuccess: () => {
           setTimeout(() => qc.invalidateQueries({ queryKey: ['queue-stats'] }), 1500);
         },
+      }),
+    ])
+  );
+
+  const pauseMuts = Object.fromEntries(
+    QUEUE_TYPES.map(qt => [
+      qt.runType,
+      // eslint-disable-next-line react-hooks/rules-of-hooks
+      useMutation({
+        mutationFn: () => pauseQueue(qt.runType),
+        onSuccess: () => qc.invalidateQueries({ queryKey: ['queue-pause-state'] }),
+      }),
+    ])
+  );
+
+  const resumeMuts = Object.fromEntries(
+    QUEUE_TYPES.map(qt => [
+      qt.runType,
+      // eslint-disable-next-line react-hooks/rules-of-hooks
+      useMutation({
+        mutationFn: () => resumeQueue(qt.runType),
+        onSuccess: () => qc.invalidateQueries({ queryKey: ['queue-pause-state'] }),
       }),
     ])
   );
@@ -501,6 +578,10 @@ export function MonitorRunsOverview() {
             stats={queueStats?.[qt.key]}
             onTrigger={() => triggerMuts[qt.runType].mutate()}
             isTriggering={triggerMuts[qt.runType].isPending}
+            isPaused={!!pauseState?.[qt.key]}
+            onPause={() => pauseMuts[qt.runType].mutate()}
+            onResume={() => resumeMuts[qt.runType].mutate()}
+            isPauseToggling={pauseMuts[qt.runType].isPending || resumeMuts[qt.runType].isPending}
           />
         ))}
       </div>

@@ -1,0 +1,416 @@
+"""
+Career Page Finder v5.1 — direct from CareerPageFinderV4.
+
+v5.1 adds:
+1. Non-HTML/bad-target rejection (PDF/feed/login/root shell safeguards).
+2. ATS-aware platform probing (Salesforce/Oracle/Zoho/Greenhouse + localized career paths).
+3. Homepage hub-link recovery with stronger listing scoring.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from urllib.parse import parse_qsl, urljoin, urlparse
+
+import httpx
+from lxml import etree
+
+from app.crawlers.career_page_finder_v2 import _CLIENT_HEADERS
+from app.crawlers.career_page_finder_v4 import CareerPageFinderV4
+
+logger = logging.getLogger(__name__)
+
+_LOCALIZED_CAREER_PATHS_V51 = [
+    "/jobs",
+    "/careers",
+    "/career",
+    "/job-openings",
+    "/join-our-team",
+    "/openings",
+    "/vacancies",
+    "/positions",
+    "/recruitment",
+    "/jobs/search",
+    "/careers/jobs",
+    "/lowongan",
+    "/loker",
+    "/karir",
+    "/kerjaya",
+    "/peluang-karir",
+]
+
+_LISTING_TEXT_PATTERN_V51 = re.compile(
+    r"\b(?:careers?|jobs?|job\s+openings?|open\s+positions?|vacanc(?:y|ies)|"
+    r"join\s+our\s+team|search\s+jobs|current\s+jobs?|current\s+vacancies|"
+    r"lowongan|loker|karir|kerjaya|peluang\s+karir|info\s+lengkap)\b",
+    re.IGNORECASE,
+)
+
+_LISTING_HREF_PATTERN_V51 = re.compile(
+    r"/(?:career|careers|jobs?|openings?|vacanc|position|recruit|lowongan|loker|karir|kerjaya)",
+    re.IGNORECASE,
+)
+
+_BAD_TARGET_URL_PATTERN_V51 = re.compile(
+    r"(?:downloadrssfeed|/feed(?:/|$|\?)|\.pdf(?:$|\?)|/login(?:/|$|\?)|"
+    r"fscmUI/faces/AtkHomePageWelcome)",
+    re.IGNORECASE,
+)
+
+
+class CareerPageFinderV51(CareerPageFinderV4):
+    """v5.1 finder with platform-aware recovery and bad-target rejection."""
+
+    async def find(self, domain: str, company_name: str = "") -> dict:
+        try:
+            parent_disc = await asyncio.wait_for(super().find(domain, company_name), timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.warning("v5.1 parent finder timeout for %s", domain)
+            parent_disc = {"url": None, "method": "parent_timeout", "candidates": [], "html": None}
+        except Exception:
+            logger.exception("v5.1 parent finder failed for %s", domain)
+            parent_disc = {"url": None, "method": "parent_error", "candidates": [], "html": None}
+
+        needs_recovery = not self._is_usable_discovery_v51(parent_disc)
+        if not needs_recovery:
+            upgraded = await self._try_platform_upgrade_v51(parent_disc)
+            if upgraded:
+                return upgraded
+            return parent_disc
+
+        recovered = await self._probe_platform_paths_v51(domain, company_name, parent_disc)
+        if recovered:
+            return recovered
+
+        hub_recovered = await self._homepage_hub_recovery_v51(domain)
+        if hub_recovered:
+            return hub_recovered
+
+        return parent_disc
+
+    def _is_usable_discovery_v51(self, disc: dict) -> bool:
+        url = disc.get("url") or ""
+        body = disc.get("html") or ""
+        if not url or not body or len(body) < 180:
+            return False
+        if self._is_bad_target_url_v51(url):
+            return False
+        if self._looks_non_html_payload_v51(body) and not self._looks_like_feed_xml_v51(body):
+            return False
+
+        score = self._score_listing_page_v51(url, body)
+        return score >= 2
+
+    async def _try_platform_upgrade_v51(self, disc: dict) -> dict | None:
+        url = disc.get("url") or ""
+        html_body = disc.get("html") or ""
+        if not url:
+            return None
+
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        probe_candidates: list[str] = []
+
+        if "oraclecloud.com" in host and "candidateexperience" not in (parsed.path or "").lower():
+            probe_candidates.extend([
+                f"{parsed.scheme or 'https'}://{parsed.netloc}/hcmUI/CandidateExperience/en/sites/CX/requisitions",
+                f"{parsed.scheme or 'https'}://{parsed.netloc}/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+            ])
+
+        if "salesforce-sites.com" in host and "fRecruit__ApplyJobList" not in url:
+            probe_candidates.extend([
+                f"{parsed.scheme or 'https'}://{parsed.netloc}/careers/fRecruit__ApplyJobList?portal=English",
+                f"{parsed.scheme or 'https'}://{parsed.netloc}/careers/",
+            ])
+
+        if "zohorecruit" in host and "portal.na" not in url.lower():
+            probe_candidates.append(f"{parsed.scheme or 'https'}://{parsed.netloc}/recruit/Portal.na")
+
+        if "job-boards.greenhouse.io" in host:
+            query = dict(parse_qsl(parsed.query))
+            slug = (query.get("for") or "").strip()
+            if slug:
+                probe_candidates.append(f"https://job-boards.greenhouse.io/embed/job_board?for={slug}")
+                probe_candidates.append(f"https://job-boards.greenhouse.io/{slug}")
+
+        if not probe_candidates:
+            return None
+
+        best = await self._fetch_best_probe_v51(probe_candidates)
+        if not best:
+            return None
+
+        best_url, best_html, best_score = best
+        if best_score <= self._score_listing_page_v51(url, html_body):
+            return None
+
+        return {
+            "url": best_url,
+            "method": f"{disc.get('method') or 'v4'}+platform_upgrade_v51",
+            "candidates": [best_url] + list(disc.get("candidates") or [])[:4],
+            "html": best_html,
+        }
+
+    async def _probe_platform_paths_v51(self, domain: str, company_name: str, parent_disc: dict) -> dict | None:
+        base_url = f"https://{domain}"
+
+        paths = list(_LOCALIZED_CAREER_PATHS_V51)
+
+        if "salesforce-sites.com" in domain:
+            paths.extend([
+                "/careers/",
+                "/careers/fRecruit__ApplyJobList?portal=English",
+            ])
+
+        if "oraclecloud.com" in domain:
+            paths.extend([
+                "/hcmUI/CandidateExperience/en/sites/CX/requisitions",
+                "/hcmUI/CandidateExperience/en/sites/CX_1001/requisitions",
+            ])
+
+        if "zohorecruit" in domain:
+            paths.extend([
+                "/recruit/Portal.na",
+                "/recruit/",
+            ])
+
+        if "job-boards.greenhouse.io" in domain:
+            slug = self._slugify_company_v51(company_name)
+            if slug:
+                paths.extend([
+                    f"/embed/job_board?for={slug}",
+                    f"/{slug}",
+                ])
+
+            parent_url = (parent_disc.get("url") or "")
+            if parent_url:
+                query = dict(parse_qsl(urlparse(parent_url).query))
+                parent_slug = (query.get("for") or "").strip()
+                if parent_slug:
+                    paths.extend([
+                        f"/embed/job_board?for={parent_slug}",
+                        f"/{parent_slug}",
+                    ])
+
+        probes = []
+        seen = set()
+        for path in paths:
+            url = path if path.startswith("http") else base_url + path
+            norm = url.rstrip("/")
+            if norm in seen:
+                continue
+            seen.add(norm)
+            probes.append(url)
+
+        best = await self._fetch_best_probe_v51(probes)
+        if not best:
+            return None
+
+        best_url, best_html, best_score = best
+        if best_score < 2:
+            return None
+
+        return {
+            "url": best_url,
+            "method": "probe_v51",
+            "candidates": probes[:6],
+            "html": best_html,
+        }
+
+    async def _fetch_best_probe_v51(self, urls: list[str]) -> tuple[str, str, int] | None:
+        if not urls:
+            return None
+
+        async with httpx.AsyncClient(timeout=4.5, follow_redirects=True, headers=_CLIENT_HEADERS) as client:
+
+            async def _try(url: str) -> tuple[str, str | None, int]:
+                try:
+                    resp = await client.get(url)
+                except Exception:
+                    return url, None, -999
+
+                body = resp.text or ""
+                if resp.status_code != 200 or len(body) < 140:
+                    return str(resp.url), None, -999
+
+                resolved = str(resp.url)
+                if self._is_bad_target_url_v51(resolved):
+                    return resolved, None, -999
+                if self._looks_non_html_payload_v51(body) and not self._looks_like_feed_xml_v51(body):
+                    return resolved, None, -999
+
+                score = self._score_listing_page_v51(resolved, body)
+                return resolved, body, score
+
+            results = await asyncio.gather(*[_try(url) for url in urls[:12]])
+
+        valid = [(url, body, score) for url, body, score in results if body]
+        if not valid:
+            return None
+
+        return max(valid, key=lambda item: item[2])
+
+    async def _homepage_hub_recovery_v51(self, domain: str) -> dict | None:
+        base_url = f"https://{domain}"
+
+        try:
+            async with httpx.AsyncClient(timeout=4.5, follow_redirects=True, headers=_CLIENT_HEADERS) as client:
+                resp = await client.get(base_url)
+                if resp.status_code != 200:
+                    return None
+
+                body = resp.text or ""
+                if len(body) < 200 or self._looks_non_html_payload_v51(body):
+                    return None
+
+                root = etree.fromstring(body.encode("utf-8", errors="replace"), etree.HTMLParser(encoding="utf-8"))
+
+                scored_links: list[tuple[int, str, str]] = []
+                seen: set[str] = set()
+
+                for a_el in root.xpath("//a[@href]")[:1800]:
+                    href = (a_el.get("href") or "").strip()
+                    if not href or href.startswith("#") or href.startswith("javascript:"):
+                        continue
+
+                    full_url = urljoin(base_url, href)
+                    parsed = urlparse(full_url)
+                    if not parsed.netloc:
+                        continue
+
+                    home_host = urlparse(base_url).netloc.lower()
+                    link_host = parsed.netloc.lower()
+                    if link_host != home_host:
+                        base_a = ".".join(home_host.split(".")[-2:])
+                        base_b = ".".join(link_host.split(".")[-2:])
+                        if base_a != base_b:
+                            continue
+
+                    norm = full_url.rstrip("/")
+                    if norm in seen:
+                        continue
+                    seen.add(norm)
+
+                    text = self._safe_text_v51(a_el)
+                    score = 0
+                    if _LISTING_TEXT_PATTERN_V51.search(text):
+                        score += 10
+                    if _LISTING_HREF_PATTERN_V51.search(parsed.path or ""):
+                        score += 8
+                    if self._is_bad_target_url_v51(full_url):
+                        score -= 8
+                    if score > 0:
+                        scored_links.append((score, full_url, text[:60]))
+
+                if not scored_links:
+                    return None
+
+                scored_links.sort(key=lambda item: item[0], reverse=True)
+
+                for _score, candidate_url, label in scored_links[:3]:
+                    try:
+                        sub_resp = await client.get(candidate_url)
+                    except Exception:
+                        continue
+
+                    sub_body = sub_resp.text or ""
+                    if sub_resp.status_code != 200 or len(sub_body) < 180:
+                        continue
+                    if self._looks_non_html_payload_v51(sub_body) and not self._looks_like_feed_xml_v51(sub_body):
+                        continue
+
+                    sub_score = self._score_listing_page_v51(str(sub_resp.url), sub_body)
+                    if sub_score < 2:
+                        continue
+
+                    return {
+                        "url": str(sub_resp.url),
+                        "method": f"homepage_hub_v51:{label}",
+                        "candidates": [u for _, u, _ in scored_links[:5]],
+                        "html": sub_body,
+                    }
+
+        except Exception:
+            logger.debug("v5.1 homepage hub recovery failed for %s", domain)
+
+        return None
+
+    def _score_listing_page_v51(self, page_url: str, html_body: str) -> int:
+        lower = (html_body or "").lower()
+        score = 0
+
+        if any(tok in (page_url or "").lower() for tok in ("jobs", "careers", "lowongan", "loker", "karir", "kerjaya", "requisitions")):
+            score += 2
+
+        score += min(lower.count("apply"), 8)
+        score += min(lower.count("job"), 10) // 2
+        score += min(lower.count("vacanc"), 6)
+
+        if "job-post" in lower:
+            score += 6
+        if "datarow" in lower and "frecruit__applyjob" in lower:
+            score += 7
+        if "jobdetailrow" in lower or "portaldetail.na" in lower:
+            score += 6
+        if "candidateexperience" in lower and "requisition" in lower:
+            score += 5
+        if "__next_data__" in lower and ("clientcode" in lower or "recruiterid" in lower):
+            score += 3
+
+        if "downloadrssfeed" in (page_url or "").lower():
+            score -= 6
+        if self._is_bad_target_url_v51(page_url):
+            score -= 5
+
+        if lower.count("<a ") <= 2 and "requisition" not in lower:
+            score -= 1
+
+        return score
+
+    @staticmethod
+    def _looks_non_html_payload_v51(body: str) -> bool:
+        if not body:
+            return True
+        sample = body[:900].lstrip()
+        if sample.startswith("%PDF-"):
+            return True
+        low = sample.lower()
+        if (low.startswith("{") or low.startswith("[")) and "<html" not in low[:320]:
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_feed_xml_v51(body: str) -> bool:
+        sample = (body or "")[:3200].lstrip().lower()
+        return sample.startswith("<?xml") or "<rss" in sample or "<feed" in sample
+
+    @staticmethod
+    def _is_bad_target_url_v51(url: str) -> bool:
+        return bool(_BAD_TARGET_URL_PATTERN_V51.search((url or "").strip()))
+
+    @staticmethod
+    def _slugify_company_v51(company_name: str) -> str:
+        value = (company_name or "").strip().lower()
+        if not value:
+            return ""
+        value = re.sub(r"[^a-z0-9\s-]", "", value)
+        value = re.sub(r"\s+", "-", value).strip("-")
+        if len(value) < 3:
+            return ""
+        return value
+
+    @staticmethod
+    def _safe_text_v51(el: etree._Element) -> str:
+        try:
+            txt = el.text_content()
+            if txt:
+                return " ".join(txt.split())
+        except Exception:
+            pass
+        try:
+            txt = etree.tostring(el, method="text", encoding="unicode")
+            return " ".join((txt or "").split())
+        except Exception:
+            return ""

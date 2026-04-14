@@ -66,3 +66,10 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+# Serve uploaded files (feedback screenshots, etc.)
+import os
+from fastapi.staticfiles import StaticFiles
+_storage_dir = "/storage"
+if os.path.isdir(_storage_dir):
+    app.mount("/storage", StaticFiles(directory=_storage_dir), name="storage")

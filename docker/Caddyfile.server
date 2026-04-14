@@ -5,6 +5,10 @@
     handle /api/* {
         reverse_proxy api:8000
     }
+    # Storage (uploaded files — screenshots etc.)
+    handle /storage/* {
+        reverse_proxy api:8000
+    }
     handle /* {
         reverse_proxy frontend:80
     }

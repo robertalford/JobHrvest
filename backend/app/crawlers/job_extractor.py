@@ -806,19 +806,25 @@ class JobExtractor:
         Handles multiple template types saved by SiteStructureExtractor:
           - detail_page: TemplateLearner CSS/field selectors for a single job
           - repeating_block / llm_bootstrapped: CSS selector targeting job list items
+          - listing_page (site_wrapper_import): external wrapper configs with XPath/CSS
           - llm_field_validated: LLM-extracted fields for a single-job detail page
         """
-        from sqlalchemy import select
+        from sqlalchemy import select as sa_select
         from app.models.site_template import SiteTemplate
 
-        template = await self.db.scalar(
-            select(SiteTemplate).where(
+        # Get all active templates for this page, prefer listing_page (imported wrappers)
+        templates = (await self.db.scalars(
+            sa_select(SiteTemplate).where(
                 SiteTemplate.career_page_id == career_page.id,
                 SiteTemplate.is_active == True,
             )
-        )
-        if not template or not template.selectors:
+        )).all()
+        if not templates:
             return []
+
+        # Sort: listing_page (imported wrappers are proven) first, then repeating_block, then others
+        templates.sort(key=lambda t: (0 if t.template_type == "listing_page" else 1 if t.template_type == "repeating_block" else 2))
+        template = templates[0]
 
         tmpl_type = template.template_type
         selectors = template.selectors or {}
@@ -829,6 +835,18 @@ class JobExtractor:
             learner = TemplateLearner()
             result = learner.extract_with_template(html, selectors)
             return [result] if result.get("title") else []
+
+        # listing_page (site_wrapper_import): proven XPath/CSS configs from external system
+        if tmpl_type == "listing_page" and selectors.get("record_boundary_path"):
+            logger.info(f"Using wrapper template for {career_page.url} (boundary={selectors['record_boundary_path'][:50]})")
+            try:
+                result = self._extract_with_wrapper_template(career_page, html, selectors, template)
+                if not result:
+                    logger.info(f"Wrapper template returned 0 jobs for {career_page.url}, falling back")
+                return result
+            except Exception as e:
+                logger.warning(f"Wrapper template extraction failed for {career_page.url}: {e}")
+                return []
 
         # repeating_block / llm_bootstrapped: apply saved CSS selector to find job list items
         if tmpl_type in ("repeating_block", "llm_bootstrapped"):
@@ -998,6 +1016,443 @@ class JobExtractor:
             }]
 
         return []
+
+    def _extract_with_wrapper_template(
+        self, career_page: CareerPage, html: str, selectors: dict, template
+    ) -> list[dict]:
+        """Extract jobs using imported site_wrapper configs (XPath + CSS selectors).
+
+        These templates come from an external crawling system and use a different
+        selector schema: record_boundary_path, job_title_path, row_location_paths, etc.
+        Supports both CSS selectors and XPath expressions.
+        """
+        from bs4 import BeautifulSoup
+        from lxml import etree
+        from urllib.parse import urljoin
+        import re
+
+        boundary = selectors.get("record_boundary_path", "")
+        title_path = selectors.get("job_title_path", "")
+        url_pattern = selectors.get("job_title_url_pattern", "")
+        container_path = selectors.get("min_container_path", "")
+        loc_paths = selectors.get("row_location_paths", [])
+        desc_paths = selectors.get("row_description_paths", [])
+        salary_paths = selectors.get("row_salary_paths", [])
+        job_type_paths = selectors.get("row_job_type_paths", [])
+        link_path = selectors.get("row_details_page_link_path", "")
+
+        if not boundary:
+            return []
+
+        # Determine if selectors are XPath or CSS
+        def is_xpath(sel: str) -> bool:
+            return sel.startswith("//") or sel.startswith(".//") or sel.startswith("(") or "/@" in sel
+
+        def select_elements(root, selector: str):
+            """Apply CSS or XPath selector to a root element."""
+            if not selector or selector in (".", "null"):
+                return [root] if selector == "." else []
+            if is_xpath(selector):
+                try:
+                    if hasattr(root, 'xpath'):
+                        return root.xpath(selector)
+                    return []
+                except Exception:
+                    return []
+            else:
+                try:
+                    if hasattr(root, 'cssselect'):
+                        return root.cssselect(selector)
+                    return []
+                except Exception:
+                    return []
+
+        def get_text(el) -> str:
+            """Get text from lxml element."""
+            if el is None:
+                return ""
+            if isinstance(el, str):
+                return el.strip()
+            try:
+                # lxml HtmlElement has text_content()
+                return el.text_content().strip()
+            except AttributeError:
+                # Fallback: collect all text nodes
+                return etree.tostring(el, method="text", encoding="unicode").strip()
+
+        def get_href(el) -> str | None:
+            """Get href from lxml element or its first <a> child."""
+            if el is None:
+                return None
+            if hasattr(el, 'get'):
+                href = el.get("href")
+                if href:
+                    return href
+                # Look for <a> children
+                for a in el.iter("a"):
+                    h = a.get("href")
+                    if h:
+                        return h
+            return None
+
+        # Parse with lxml for XPath support
+        try:
+            parser = etree.HTMLParser(encoding="utf-8")
+            tree = etree.fromstring(html.encode("utf-8", errors="replace"), parser)
+        except Exception as e:
+            logger.debug(f"lxml parse failed: {e}")
+            return []
+
+        # Find container if specified
+        root = tree
+        if container_path and container_path not in ("null", ".", ""):
+            containers = select_elements(tree, container_path)
+            if containers:
+                root = containers[0]
+
+        # Find job rows using boundary selector
+        if boundary == ".":
+            # "." means the container children ARE the rows
+            rows = list(root)
+        else:
+            rows = select_elements(root, boundary)
+
+        if len(rows) < 1:
+            return []
+
+        jobs = []
+        for row in rows:
+            # Title
+            if title_path and title_path != ".":
+                title_els = select_elements(row, title_path)
+                title = get_text(title_els[0]) if title_els else ""
+            elif title_path == ".":
+                title = get_text(row)
+            else:
+                title = ""
+
+            if not title or len(title) < 3 or len(title) > 300:
+                continue
+
+            # URL / Link
+            job_url = career_page.url
+            if link_path:
+                link_els = select_elements(row, link_path)
+                if link_els:
+                    href = get_href(link_els[0])
+                    if href:
+                        job_url = urljoin(career_page.url, href)
+            if job_url == career_page.url:
+                # Try getting href from title element or first <a>
+                title_els = select_elements(row, title_path) if title_path and title_path != "." else []
+                for tel in title_els:
+                    href = get_href(tel)
+                    if href:
+                        job_url = urljoin(career_page.url, href)
+                        break
+                if job_url == career_page.url:
+                    for a in row.iter("a"):
+                        href = a.get("href")
+                        if href and href != "#":
+                            job_url = urljoin(career_page.url, href)
+                            break
+
+            # Location
+            loc_raw = None
+            if isinstance(loc_paths, list):
+                for lp in loc_paths:
+                    if lp:
+                        loc_els = select_elements(row, lp)
+                        if loc_els:
+                            txt = get_text(loc_els[0])
+                            if txt and 1 < len(txt) < 150:
+                                loc_raw = txt
+                                break
+
+            # Salary
+            salary_raw = None
+            if isinstance(salary_paths, list):
+                for sp in salary_paths:
+                    if sp:
+                        sal_els = select_elements(row, sp)
+                        if sal_els:
+                            txt = get_text(sal_els[0])
+                            if txt and len(txt) < 100:
+                                salary_raw = txt
+                                break
+
+            # Job type
+            emp_type = None
+            if isinstance(job_type_paths, list):
+                for jtp in job_type_paths:
+                    if jtp:
+                        jt_els = select_elements(row, jtp)
+                        if jt_els:
+                            txt = get_text(jt_els[0])
+                            if txt and len(txt) < 80:
+                                emp_type = txt
+                                break
+
+            # Description (inline)
+            description = None
+            if isinstance(desc_paths, list):
+                for dp in desc_paths:
+                    if dp:
+                        desc_els = select_elements(row, dp)
+                        if desc_els:
+                            txt = get_text(desc_els[0])
+                            if txt and len(txt) > 20:
+                                description = txt[:2000]
+                                break
+
+            jobs.append({
+                "title": title,
+                "source_url": job_url,
+                "location_raw": loc_raw,
+                "salary_raw": salary_raw,
+                "employment_type": emp_type,
+                "description": description,
+                "extraction_method": "template_site_wrapper",
+                "extraction_confidence": float(template.accuracy_score or 0.8),
+            })
+
+        if jobs:
+            logger.info(
+                f"wrapper_template: {len(jobs)} jobs from {career_page.url} "
+                f"(boundary={boundary[:50]})"
+            )
+        return jobs
+
+    @staticmethod
+    @staticmethod
+    def _parse_selector_paths(value) -> list[str]:
+        """Parse wrapper selector values which come in various formats:
+        - YAML: '---\\n- ".//td[4]"\\n- ".//td[5]"'
+        - JSON array: '[".foo", ".bar"]'
+        - Plain string: '.my-class'
+        - null/empty: 'null', '', None
+        Returns a list of clean selector strings.
+        """
+        if not value or value in ("null", "None", "", "[]"):
+            return []
+        if isinstance(value, list):
+            return [s for s in value if s and s not in ("null", "None", "", "''", '""')]
+
+        s = str(value).strip()
+        if not s or s in ("null", "None", "[]"):
+            return []
+
+        # JSON array format: ["sel1", "sel2"]
+        if s.startswith("["):
+            try:
+                import json as _json
+                parsed = _json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip().strip("'\"") for x in parsed if x and str(x).strip() not in ("null", "", "''", '""')]
+            except Exception:
+                pass
+
+        # YAML format: ---\n- "sel1"\n- "sel2"
+        if s.startswith("---"):
+            lines = s.split("\n")
+            result = []
+            for line in lines:
+                line = line.strip()
+                if line.startswith("- "):
+                    val = line[2:].strip().strip("'\"")
+                    if val and val not in ("null", "", "''", '""'):
+                        result.append(val)
+            return result
+
+        # Plain string (single selector)
+        s = s.strip("'\"")
+        if s and s not in ("null", ""):
+            return [s]
+        return []
+
+    @staticmethod
+    def _static_extract_wrapper(html: str, url: str, selectors: dict) -> list[dict]:
+        """Static method: extract jobs using ALL wrapper selectors.
+
+        Uses the full wrapper config — boundary, title, link, location, salary,
+        description, job type, closing date, and URL pattern matching.
+        """
+        import re
+        from lxml import etree
+        from urllib.parse import urljoin
+
+        _parse = JobExtractor._parse_selector_paths
+
+        boundary = selectors.get("record_boundary_path", "")
+        title_path = selectors.get("job_title_path", "")
+        container_path = selectors.get("min_container_path", "")
+        link_path = selectors.get("row_details_page_link_path", "")
+        url_pattern = selectors.get("job_title_url_pattern", "")
+        loc_paths = _parse(selectors.get("row_location_paths", []))
+        desc_paths = _parse(selectors.get("row_description_paths", []))
+        salary_paths = _parse(selectors.get("row_salary_paths", []))
+        job_type_paths = _parse(selectors.get("row_job_type_paths", []))
+        closing_date_path = selectors.get("row_closing_date_path", "")
+        listed_date_path = selectors.get("row_listed_date_path", "")
+        # Detail page selectors (for reference in output, not fetched here)
+        detail_desc_paths = _parse(selectors.get("details_page_description_paths", []))
+        detail_loc_paths = _parse(selectors.get("details_page_location_paths", []))
+        detail_salary_path = selectors.get("details_page_salary_path", "")
+        detail_job_type_paths = _parse(selectors.get("details_page_job_type_paths", []))
+
+        if not boundary:
+            return []
+
+        def is_xpath(sel):
+            return sel.startswith("//") or sel.startswith(".//") or sel.startswith("(") or "/@" in sel
+
+        def select_els(root, sel):
+            if not sel or sel in (".", "null"):
+                return [root] if sel == "." else []
+            try:
+                return root.xpath(sel) if is_xpath(sel) else root.cssselect(sel)
+            except Exception:
+                return []
+
+        def get_txt(el):
+            if el is None:
+                return ""
+            try:
+                return el.text_content().strip()
+            except AttributeError:
+                return etree.tostring(el, method="text", encoding="unicode").strip()
+
+        def get_href(el):
+            if el is None:
+                return None
+            h = el.get("href")
+            if h:
+                return h
+            for a in el.iter("a"):
+                h = a.get("href")
+                if h and h != "#":
+                    return h
+            return None
+
+        def extract_field_list(row, paths):
+            """Try a list of selectors, return first match text."""
+            if not paths:
+                return None
+            if isinstance(paths, str):
+                paths = [paths]
+            for p in paths:
+                if not p or p in ("null", "''", '""'):
+                    continue
+                els = select_els(row, p)
+                if els:
+                    t = get_txt(els[0])
+                    if t and len(t) > 1 and len(t) < 500:
+                        return t
+            return None
+
+        try:
+            parser = etree.HTMLParser(encoding="utf-8")
+            tree = etree.fromstring(html.encode("utf-8", errors="replace"), parser)
+        except Exception:
+            return []
+
+        root = tree
+        if container_path and container_path not in ("null", ".", ""):
+            cs = select_els(tree, container_path)
+            if cs:
+                root = cs[0]
+
+        rows = list(root) if boundary == "." else select_els(root, boundary)
+        if not rows:
+            return []
+
+        # Compile URL pattern if provided
+        url_regex = None
+        if url_pattern and url_pattern not in ("null", "(.*)", ""):
+            try:
+                url_regex = re.compile(url_pattern)
+            except Exception:
+                pass
+
+        jobs = []
+        for row in rows:
+            # Title
+            if title_path and title_path != ".":
+                tels = select_els(row, title_path)
+                title = get_txt(tels[0]) if tels else ""
+            elif title_path == ".":
+                title = get_txt(row)
+            else:
+                title = ""
+            if not title or len(title) < 3 or len(title) > 300:
+                continue
+
+            # Link / URL
+            job_url = url
+            if link_path and link_path not in ("null", ".", ""):
+                link_els = select_els(row, link_path)
+                if link_els:
+                    h = get_href(link_els[0])
+                    if h:
+                        job_url = urljoin(url, h)
+
+            # If no link found via selector, try title element or first <a>
+            if job_url == url:
+                if title_path and title_path != ".":
+                    tels = select_els(row, title_path)
+                    for tel in tels:
+                        h = get_href(tel)
+                        if h:
+                            job_url = urljoin(url, h)
+                            break
+            if job_url == url:
+                for a in row.iter("a"):
+                    h = a.get("href")
+                    if h and h != "#" and not h.startswith("javascript:"):
+                        job_url = urljoin(url, h)
+                        break
+
+            # Location
+            location = extract_field_list(row, loc_paths)
+
+            # Salary
+            salary = extract_field_list(row, salary_paths)
+
+            # Description (inline)
+            description = extract_field_list(row, desc_paths)
+
+            # Job type
+            job_type = extract_field_list(row, job_type_paths)
+
+            # Closing date
+            closing_date = None
+            if closing_date_path and closing_date_path not in ("null", ""):
+                closing_date = extract_field_list(row, [closing_date_path])
+
+            # Listed date
+            listed_date = None
+            if listed_date_path and listed_date_path not in ("null", ""):
+                listed_date = extract_field_list(row, [listed_date_path])
+
+            # Note: detail page fields (description, location, salary from detail pages)
+            # are not fetched here since we don't follow links in the static extractor.
+            # But their presence in the wrapper indicates richer data is available.
+            has_detail_page = bool(detail_desc_paths or detail_loc_paths or detail_salary_path or detail_job_type_paths)
+
+            jobs.append({
+                "title": title,
+                "source_url": job_url,
+                "location_raw": location,
+                "salary_raw": salary,
+                "description": description,
+                "employment_type": job_type,
+                "closing_date": closing_date,
+                "listed_date": listed_date,
+                "has_detail_page": has_detail_page,
+                "extraction_method": "known_wrapper",
+            })
+
+        return jobs[:500]
 
     async def _extract_llm(self, url: str, html: str) -> list[dict]:
         """Stage 3d: LLM extraction via Ollama."""

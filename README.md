@@ -89,3 +89,9 @@ Infrastructure: Colima, Docker Compose, Caddy
 - [ ] Phase 5: Full Frontend dashboard
 - [ ] Phase 6: Scheduling, change detection, job lifecycle
 - [ ] Phase 7: Advanced — sklearn classifier, self-discovery, anti-bot improvements
+
+## Auto-Improve Status
+
+- Latest extractor iteration: `v10.5` (`backend/app/crawlers/tiered_extractor_v100.py`)
+- Latest finder iteration: `v9.1` (`backend/app/crawlers/career_page_finder_v91.py`)
+- Focus of v10.5: recover JS-shell and static no-link failure patterns via shell endpoint extraction (`fetch('*.json')`, Workday/Martian hints), same-page section role parsing, and WordPress entry-title job-feed extraction while preserving v10.4 dedupe/metadata quality fixes.
