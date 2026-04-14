@@ -1,20 +1,15 @@
-import { NavLink, useNavigate } from 'react-router-dom';
-import {
-  LayoutDashboard, Building2, Briefcase, Globe, Activity,
-  Upload, HelpCircle, ShieldX, Ban, Globe2, Search, Clock,
-  Type, AlertTriangle, Star, Copy, Info, MapPin, Database,
-  LogOut,
-} from 'lucide-react';
+import { NavLink, useLocation, Link, useNavigate } from 'react-router-dom';
+import { Home, LogOut } from 'lucide-react';
 import logoImg from '/logo.png';
+import type { NavEntry } from '../../lib/sections';
+import { GLOBAL_NAV, getSectionByPath } from '../../lib/sections';
 import { clearToken } from '../../lib/auth';
 
-type NavItem = { to: string; icon: React.ElementType; label: string };
-
-function NavItem({ to, icon: Icon, label }: NavItem) {
+function NavItemLink({ to, icon: Icon, label, end }: NavEntry & { end?: boolean }) {
   return (
     <NavLink
       to={to}
-      end={to === '/'}
+      end={end}
       className={({ isActive }) =>
         `flex items-center gap-3 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
           isActive ? 'bg-brand/10 text-brand' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
@@ -35,8 +30,22 @@ function SectionLabel({ label }: { label: string }) {
   );
 }
 
+function groupEntries(entries: NavEntry[]): Array<{ group: string; items: NavEntry[] }> {
+  const groups: Array<{ group: string; items: NavEntry[] }> = [];
+  for (const item of entries) {
+    const g = item.group || '';
+    const last = groups[groups.length - 1];
+    if (last && last.group === g) last.items.push(item);
+    else groups.push({ group: g, items: [item] });
+  }
+  return groups;
+}
+
 export function Sidebar() {
+  const { pathname } = useLocation();
   const navigate = useNavigate();
+  const section = getSectionByPath(pathname);
+  const groups = section ? groupEntries(section.nav) : [];
 
   function handleLogout() {
     clearToken();
@@ -45,51 +54,38 @@ export function Sidebar() {
 
   return (
     <aside className="w-56 bg-white border-r border-gray-200 flex flex-col min-h-screen">
-      <div className="p-4 border-b border-gray-200">
+      <Link to="/" className="p-4 border-b border-gray-200 block hover:bg-gray-50 transition-colors">
         <div className="flex items-center justify-center gap-2">
           <img src={logoImg} alt="JobHarvest" className="w-8 h-8 rounded-lg object-cover" />
           <span className="font-semibold text-sm text-gray-900">JobHarvest</span>
         </div>
-      </div>
+      </Link>
 
       <nav className="flex-1 p-2 overflow-y-auto">
-        {/* Prod Database */}
-        <SectionLabel label="Prod Database" />
-        <NavItem to="/" icon={LayoutDashboard} label="Overview" />
-        <NavItem to="/discovery-sources" icon={Globe2} label="Link Discovery" />
-        <NavItem to="/companies" icon={Building2} label="Companies" />
-        <NavItem to="/career-pages" icon={Globe} label="Sites" />
-        <NavItem to="/jobs" icon={Briefcase} label="Jobs" />
+        <NavItemLink to="/" icon={Home} label="Home" end />
 
-        {/* Monitor Runs */}
-        <SectionLabel label="Monitor Runs" />
-        <NavItem to="/monitor-runs" icon={LayoutDashboard} label="Overview" />
-        <NavItem to="/discovery-runs" icon={Search} label="Discovery Runs" />
-        <NavItem to="/company-config-runs" icon={Building2} label="Company Config Runs" />
-        <NavItem to="/site-config-runs" icon={Globe} label="Site Config Runs" />
-        <NavItem to="/crawl" icon={Activity} label="Site Crawling Runs" />
+        {section && (
+          <>
+            <div className="px-3 pt-4 pb-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-brand">
+                {section.title}
+              </span>
+            </div>
+            {groups.map(({ group, items }, idx) => (
+              <div key={`${group}-${idx}`}>
+                {group && <SectionLabel label={group} />}
+                {items.map((item) => (
+                  <NavItemLink key={item.to} {...item} />
+                ))}
+              </div>
+            ))}
+          </>
+        )}
 
-        {/* Settings */}
-        <SectionLabel label="Settings" />
-        <NavItem to="/lead-imports" icon={Upload} label="Company Import" />
-        <NavItem to="/domain-import" icon={Database} label="Bulk Domain Import" />
-        <NavItem to="/excluded-sites" icon={Ban} label="Excluded Sites" />
-        <NavItem to="/banned-jobs" icon={ShieldX} label="Banned Jobs" />
-        <NavItem to="/markets" icon={Globe2} label="Live Markets" />
-        <NavItem to="/crawl-schedule" icon={Clock} label="Scheduled Runs" />
-        <NavItem to="/geocoder" icon={MapPin} label="Geocoder" />
-        <NavItem to="/bad-words" icon={Type} label="Bad Words" />
-        <NavItem to="/scam-words" icon={AlertTriangle} label="Scam Words" />
-
-        {/* Review & Train */}
-        <SectionLabel label="Review & Train Model" />
-        <NavItem to="/duplicates" icon={Copy} label="Duplicates" />
-        <NavItem to="/job-quality" icon={Star} label="Job Quality" />
-
-        {/* More */}
         <SectionLabel label="More" />
-        <NavItem to="/how-to" icon={HelpCircle} label="How To" />
-        <NavItem to="/settings" icon={Info} label="System Health" />
+        {GLOBAL_NAV.map((item) => (
+          <NavItemLink key={item.to} {...item} />
+        ))}
       </nav>
 
       <div className="p-3 border-t border-gray-200 space-y-2">
@@ -100,7 +96,7 @@ export function Sidebar() {
           <LogOut className="w-4 h-4" />
           Log out
         </button>
-        <div className="text-xs text-gray-400 text-center">v0.2.0</div>
+        <div className="text-xs text-gray-400 text-center">v0.3.0</div>
       </div>
     </aside>
   );

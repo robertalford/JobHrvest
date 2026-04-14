@@ -14,6 +14,18 @@ from app.models.settings import WordFilter, SystemSetting
 from app.models.geo_location import GeoLocation, GeocodeCache
 from app.models.test_data import CrawlerTestData, JobSiteTestData, SiteUrlTestData, SiteWrapperTestData
 from app.models.ml_model import MLModel, MLModelTestRun, MLTestFeedback, CodexImprovementRun
+from app.models.champion_challenger import (
+    ModelVersion,
+    GoldHoldoutSet,
+    GoldHoldoutDomain,
+    GoldHoldoutSnapshot,
+    GoldHoldoutJob,
+    Experiment,
+    MetricSnapshot,
+    AtsPatternProposal,
+    DriftBaseline,
+    InferenceMetricsHourly,
+)
 
 __all__ = [
     "Market",
@@ -40,4 +52,14 @@ __all__ = [
     "MLModelTestRun",
     "MLTestFeedback",
     "CodexImprovementRun",
+    "ModelVersion",
+    "GoldHoldoutSet",
+    "GoldHoldoutDomain",
+    "GoldHoldoutSnapshot",
+    "GoldHoldoutJob",
+    "Experiment",
+    "MetricSnapshot",
+    "AtsPatternProposal",
+    "DriftBaseline",
+    "InferenceMetricsHourly",
 ]

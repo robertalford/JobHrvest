@@ -26,9 +26,11 @@ frontend/.vite/
 # Docker
 docker-compose.override.yml
 
-# Storage (raw HTML snapshots etc)
-storage/raw_html/
-storage/screenshots/
+# Storage (raw HTML snapshots, model binaries, user uploads, data dumps)
+storage/
+
+# Celery runtime state (rewritten on every worker run)
+backend/celerybeat-schedule
 
 # OS
 .DS_Store

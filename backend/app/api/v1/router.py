@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from app.api.v1.endpoints import (
     health, companies, career_pages, jobs, crawl, analytics, system,
     lead_imports, settings as settings_endpoints, excluded_sites, review,
-    discovery_sources, geocoder, domain_imports,
+    discovery_sources, geocoder, domain_imports, bulk_domain_process,
 )
 from app.api.v1.endpoints.auth import router as auth_router, get_current_user
 
@@ -30,3 +30,4 @@ api_router.include_router(review.router,             prefix="/review",          
 api_router.include_router(discovery_sources.router,  prefix="/discovery-sources", tags=["discovery-sources"], dependencies=_auth)
 api_router.include_router(geocoder.router,           prefix="/geocoder",          tags=["geocoder"],          dependencies=_auth)
 api_router.include_router(domain_imports.router,     prefix="/domain-imports",    tags=["domain-imports"],    dependencies=_auth)
+api_router.include_router(bulk_domain_process.router, prefix="/bulk-domain-process", tags=["bulk-domain-process"], dependencies=_auth)

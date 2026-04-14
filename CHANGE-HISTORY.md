@@ -2,6 +2,107 @@
 
 ---
 
+## 2026-04-14 (session 14 — 3-section app redesign + Bulk Domain Processor)
+
+**Prompt:**
+Redesign the app so that after login the user lands on a page with 3 card links:
+(1) **Site Config** — the champion/challenger model that takes a domain and outputs the site URLs plus CSS/XPath selectors for each baseline extraction field, (2) **Extraction** — scheduled scraping using the defined site configs, (3) **Domain Discovery** — crawling the web to find new in-scope domains. The second two should be toggled off for now while we focus on the Site Config model. Each card routes into a sub-app that shows only that section's menu items (Sites, Test Data, Models, etc. for Site Config). The champion model must also be usable standalone — upload a CSV of domains and download a CSV with the extraction-selector columns filled where confidence is high, aligned to the production import schema.
+
+**Changes:**
+
+Frontend — routing + layout:
+- `frontend/src/App.tsx` — replaced flat routes with 3 section-prefixed route trees (`/site-config/*`, `/extraction/*`, `/discovery/*`); added `SectionGate` guard that renders a "paused" notice for disabled sections; added `LegacyRedirect` for pre-redesign bookmarks (e.g. `/companies` → `/extraction/companies`).
+- `frontend/src/lib/sections.ts` — NEW: section definitions, feature flags (`VITE_FEATURE_EXTRACTION`, `VITE_FEATURE_DISCOVERY`), and section-scoped nav metadata consumed by the landing page + Sidebar. Single source of truth for section/nav config.
+- `frontend/src/components/layout/Sidebar.tsx` — rewritten to be URL-aware: detects the active section from `pathname` and renders only that section's nav groups; the logo now links to `/` to return to the 3-card home; global nav (How To, System Health) stays visible everywhere.
+
+Frontend — new pages:
+- `frontend/src/components/pages/SectionLanding.tsx` — NEW: post-login landing, one card per section with tagline and "Disabled" badge for off sections.
+- `frontend/src/components/pages/SectionDisabled.tsx` — NEW: deep-link-safe "paused" notice with instructions to flip the feature flag.
+- `frontend/src/components/pages/BulkDomainProcessor.tsx` — NEW: CSV upload + confidence-threshold slider + result download; shows the output column schema fetched from the backend so users know what the production-import-compatible CSV contains.
+- `frontend/src/components/pages/Models.tsx`, `TestData.tsx` — NEW: skeleton pages for the Site Config section (model registry UI + gold-holdout browser to follow).
+
+Backend — bulk domain processor:
+- `backend/app/services/bulk_domain_processor.py` — NEW: pure CSV parse/build functions + async `process_domains()` orchestrator stub. The `CSV_OUTPUT_FIELDS` list is derived from `TARGET_FIELDS` in `app/extractors/template_learner.py`, so the output schema can't drift from the extraction pipeline's baseline fields. Selectors are blanked for rows below the configured confidence threshold so the output is safe to import wholesale.
+- `backend/app/api/v1/endpoints/bulk_domain_process.py` — NEW: `GET /schema` (column list + default threshold) and `POST /run` (multipart CSV upload → CSV download). Auth-gated via the existing v1 router dependency.
+- `backend/app/api/v1/router.py` — registers the new router under `/bulk-domain-process`.
+- `backend/tests/unit/test_bulk_domain_processor.py` — NEW: 13 tests covering CSV input normalisation (URL/scheme stripping, dedup, header handling), output schema contract (columns match `TARGET_FIELDS`), and confidence-gated selector emission. All passing.
+
+**Verification:**
+- Backend: `python3 -m pytest tests/unit/test_bulk_domain_processor.py` → 13 passed.
+- Frontend: `tsc -b --noEmit` clean; `eslint` on all new/changed files clean; `vite build` succeeds; dev server boots without warnings.
+- Browser walkthrough of the landing + Site Config sub-app is pending (no browser automation available in this session) — should be sanity-checked manually before merging.
+
+**Scope notes / follow-ups:**
+- `process_domains()` currently returns `pending`/"champion model serving not yet wired" placeholder rows. The CSV round-trip (upload → parse → run → download) works end-to-end; wiring the actual `ChampionChallengerOrchestrator` + `SiteStructureExtractor` path is the next increment.
+- Most Site Config sub-pages (Sites, Runs, Excluded Sites) re-use existing components from the pre-redesign layout — no behavioural changes, only URL moves.
+- Extraction + Discovery sections are fully wired but gated off. Flip `VITE_FEATURE_EXTRACTION=true` / `VITE_FEATURE_DISCOVERY=true` and rebuild to re-enable.
+
+---
+
+## 2026-04-14 (session 13 — Champion/challenger ML infrastructure)
+
+**Prompts:**
+- Review `job-crawler-technical-deep-dive.md` (third-party design doc) and recommend what to put in place BEFORE starting up the champion/challenger model and auto-improve loop.
+- Implement all of the recommended fixes, hardening items, and opportunities now.
+
+**Headline finding identified during review:**
+The existing TF-IDF/LR description classifier reports F1=0.9963 — but its training labels are derived from `quality_score`, which is itself a rule set. The model is mimicking the rules, not learning ground truth. Promotion decisions against this label oracle are unfalsifiable.
+
+**Changes:**
+
+Backend — DB:
+- `backend/alembic/versions/0023_champion_challenger_infra.py` — NEW: 10 tables to support a hard-gated champion/challenger loop
+  - `model_versions` — registered model artifacts + lineage; partial unique index enforces one champion per model_name
+  - `gold_holdout_sets` / `gold_holdout_domains` / `gold_holdout_snapshots` / `gold_holdout_jobs` — frozen evaluation sets sourced from `lead_imports` (split off so domains are the holdout unit, jobs are per-domain ground truth)
+  - `experiments` + `metric_snapshots` (stratum-keyed, with bootstrap CI columns) — full audit trail of every champion-vs-challenger comparison
+  - `ats_pattern_proposals` — quarantine for LLM-suggested ATS selectors (proposed → shadow → active)
+  - `drift_baselines` — reference feature distributions for PSI-based drift detection
+  - `inference_metrics_hourly` — rolled-up p50/p95/p99 latency + LLM escalation count per (model_version, hour)
+
+Backend — SQLAlchemy ORM:
+- `backend/app/models/champion_challenger.py` — NEW: ORM mappings for all 10 tables above
+- `backend/app/models/__init__.py` — export the new model classes for Alembic discovery
+
+Backend — ML modules (`backend/app/ml/champion_challenger/`):
+- `__init__.py` — module overview
+- `domain_splitter.py` — split-by-domain enforcement; AU/NZ/UK compound-TLD aware; `assert_holdout_isolation` hard guard against GOLD leakage
+- `promotion.py` — bootstrap CIs, exact-binomial McNemar test (correct for small samples), multi-metric promotion gate with min_delta + p-value + min-metrics-won requirements
+- `drift_monitor.py` — PSI on numeric (quantile-binned) and categorical features with negligible/moderate/significant classification
+- `failure_analysis.py` — Ollama-backed (NOT Claude API per CLAUDE.md "use what's running") structured failure-pattern analyser with tolerant JSON parsing
+- `uncertainty.py` — margin-based uncertainty + stratified active sampling for the review queue (so the human-review backlog isn't dominated by a single ATS or market)
+- `ats_quarantine.py` — pure-functional state machine for proposed → shadow → active LLM-pattern promotion; strict defaults (≥25 matches, ≤10% failure rate, ≥24h window)
+- `latency_budget.py` — Redis ZSET-based per-inference observation tracker + p50/p95/p99 percentile helpers + budget check that defers judgement on small samples
+- `holdout_builder.py` — materialise a frozen GOLD holdout from `lead_imports` (snapshots HTML to disk; freezes the set on completion; idempotent on `name`)
+- `holdout_evaluator.py` — stratified evaluator (overall + per-ATS + per-market); rapidfuzz title matching with substring fallback; bootstrap CI on F1
+- `orchestrator.py` — `ChampionChallengerOrchestrator.run_experiment` ties registry → evaluator → McNemar → multi-metric gates → latency budget check → atomic promotion (retire old champion + crown new in one tx)
+- `registry.py` — thin async helpers around `model_versions` (register, list, get_champion, crown_initial_champion bootstrap)
+
+Backend — CLI:
+- `backend/scripts/build_gold_holdout.py` — NEW: one-shot script to materialise a holdout set from `lead_imports`. Snapshots written under `/storage/gold_holdout/`. Manual follow-up required to populate `gold_holdout_jobs` (verification is intentionally human-in-the-loop).
+
+Tests (BDD/TDD per CLAUDE.md):
+- `tests/unit/test_domain_splitter.py` — 17 tests covering compound TLDs, no-leakage invariant, holdout-isolation guard
+- `tests/unit/test_promotion.py` — 16 tests covering bootstrap CI, McNemar (incl. small-sample non-significance), multi-metric gate (promote/reject/inconclusive), lower-is-better metrics, min-delta noise filter
+- `tests/unit/test_drift_monitor.py` — 9 tests covering PSI on numeric & categorical features with known distributions
+- `tests/unit/test_uncertainty.py` — 9 tests covering margin uncertainty, top-K selection, per-stratum quotas
+- `tests/unit/test_ats_quarantine.py` — 11 tests covering the full state machine (begin_shadow → record → evaluate → promote/reject/keep)
+- `tests/unit/test_latency_budget.py` — 6 tests covering percentile correctness + budget-check edge cases
+- `tests/unit/test_failure_analysis.py` — 9 tests covering case formatting + tolerant JSON parsing (fenced code, prose-wrapped JSON, garbage)
+- `tests/unit/test_holdout_evaluator_helpers.py` — 9 tests covering stratified metric aggregation + fuzzy title matching
+- `tests/unit/test_champion_challenger_imports.py` — 3 smoke tests guaranteeing every new module + ORM class imports cleanly
+
+**Test results:** 135 tests passing (up from 33 prior). Migration 0023 parses cleanly; not yet applied to a running DB (stack was down).
+
+**Pre-flight checklist before starting the loop:**
+1. Apply migration 0023: `alembic upgrade head`
+2. Run `python -m scripts.build_gold_holdout --name au_baseline_v1 --market AU --max-domains 100`
+3. Manually verify the resulting `gold_holdout_jobs` (one-time human-in-the-loop labelling)
+4. Re-evaluate the existing TF-IDF classifier against the GOLD holdout to establish the *true* baseline
+5. Register the existing model in `model_versions` via `registry.register_model_version` then `registry.crown_initial_champion`
+6. Only then start producing challengers and running `ChampionChallengerOrchestrator.run_experiment`
+
+---
+
 ## 2026-03-20 (session 12 — Performance optimisations, menu restructure, unified Overview page)
 
 **Prompts:**

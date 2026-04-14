@@ -22,6 +22,16 @@ JobHarvest
 4. Job Detail Extraction + Normalization (location, salary, skills)
 5. Change Detection + Continuous Crawling
 
+### App Structure (3 compartmentalised features)
+
+The dashboard is split into three top-level sections, shown as cards on the post-login landing page:
+
+- **Site Config** (`/site-config/*`) — champion/challenger model that takes a domain and produces the career-page URL plus CSS/XPath selectors for each baseline extraction field. Includes a **Bulk Domain Processor** standalone tool that accepts a CSV of domains and returns a CSV with selectors filled where model confidence is high, aligned to the production import schema. *Always enabled.*
+- **Extraction** (`/extraction/*`) — scheduled scraping that uses the site configs to harvest jobs. Gated by `VITE_FEATURE_EXTRACTION`.
+- **Domain Discovery** (`/discovery/*`) — crawls the web to find new in-scope company domains to feed into Site Config. Gated by `VITE_FEATURE_DISCOVERY`.
+
+Both Extraction and Discovery are disabled by default while the Site Config model is being optimised. Set the corresponding env var to `true` and rebuild the frontend to re-enable.
+
 ### Hard-Blocked Sites (enforced at crawler level)
 
 SEEK, Jora, Jobstreet, and JobsDB are completely off-limits and blocked at the HTTP request level.
