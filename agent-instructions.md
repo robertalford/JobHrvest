@@ -67,6 +67,7 @@ Build a locally-hosted, full-stack application called **JobHarvest** — an inte
 | `database/models_snapshot.sql` | **Models-only** data dump — champion/challenger state + history + fixtures. Plain SQL, diff-friendly, **NOT** LFS-tracked. | Regenerated + committed + pushed by the auto-improve daemon after every iteration AND after every A/B completion (trigger-file driven). |
 | `database/auto_improve_memory.json` | Mirror of `storage/auto_improve_memory.json` for clone restore | Mirrored alongside `models_snapshot.sql` |
 | `database/auto_improve_history.json` | Mirror of `storage/auto_improve_history.json` for clone restore | Mirrored alongside `models_snapshot.sql` |
+| `database/play_library.json` | Mirror of `storage/play_library/` for clone restore | Regenerated alongside the model snapshot so successful extractor plays survive a fresh clone |
 | `database/backup.sh` | Hourly schema + full-DB dump script | Cron, every hour |
 | `database/dump_models.sh` | Models-only dump script invoked by the auto-improve daemon | Do not call manually unless debugging |
 
@@ -190,13 +191,14 @@ The **Site Config** section of the app (`/site-config/*`) is the home of the cha
 
 Both use a priority cascade: parent v1.6 heuristic → structured data (JSON-LD, `__NEXT_DATA__`) → dedicated ATS extractors → DOM fallbacks.
 
-### Current Champion (2026-04-14)
+### Current Champion (2026-04-15)
 
 - **Live champion:** `v6.9` (`tiered_extractor_v69.py` + `career_page_finder_v69.py`)
 - **Objective composite score:** `85.4 / 100` (best across the full history when re-scored with the capped objective formula)
 - **Breakdown:** discovery 100 · quality extraction 100 · volume accuracy 96.2 · field completeness 45.3
 - **Benchmark run:** 179 sites (129 fixed regression + 50 exploration), test run id `c1f3caac-ff49-44ea-bd51-b477b40a9d8b`
 - **Why v6.9, not a later version:** many later iterations (v6.1, v6.2, v7.2, etc.) posted higher *raw* composite scores only because of counting artefacts (e.g. `field_completeness` > 100 from multi-valued field extraction). When each axis is capped at the objective ceiling of 100, v6.9 is the clear winner — and with quality_extraction = 100 and volume_accuracy = 96.2 it achieves that with genuine breadth, not by over-emitting.
+- **Queued hotfix:** `v6.10` is intentionally a minimal `v6.9 + DetailEnricher` shipment. It exists to prove or falsify the orphan-infrastructure thesis before broader search changes are judged.
 
 The Models page was cleared on 2026-04-14 and v6.9 re-instated as the sole live champion so the next improvement run starts from the objectively best baseline we have data for.
 
@@ -238,6 +240,17 @@ The auto-improve loop used to regress-cycle: fix Workday → break SuccessFactor
 
 Observability: [`GET /api/v1/ml-models/{id}/stratum-report`](backend/app/api/v1/endpoints/ml_models.py#L780) returns the full stratified scorecard + gate verdicts for any test run, for future Models-page UI. Backfill: [`backend/scripts/backfill_ever_passed.py`](backend/scripts/backfill_ever_passed.py) replays every completed run into both new tables — run once after migration 0028 applies.
 
+### Auto-Improve v2 Redesign (landed 2026-04-15)
+
+The next iteration of the loop focuses on three concrete gaps that were causing 0 promotions across 22 challengers after the reset: the live extractor path never invoked `DetailEnricher`, Codex was reasoning from aggregate symptoms instead of structured champion-vs-baseline diffs, and candidate search was still effectively sequential despite `AUTO_IMPROVE_CANDIDATES_N=3`.
+
+- **Shipment 0 — v6.10 hotfix.** [`backend/app/crawlers/tiered_extractor_v610.py`](backend/app/crawlers/tiered_extractor_v610.py) is the only allowed "prove the thesis" release: `v6.9` listing extraction plus [`DetailEnricher`](backend/app/crawlers/detail_enricher.py) with a hard budget (`max_pages=10`, `per_host_concurrency=2`, `total_deadline_s=20`). Keep it attribution-clean; do not smuggle unrelated extractor rewrites into v6.10.
+- **Signal v2.** [`failure_analysis.py`](backend/app/ml/champion_challenger/failure_analysis.py) now emits per-site diff packages, noise scores, landmark excerpts, and rejection post-mortems. [`memory_store.py`](backend/app/ml/champion_challenger/memory_store.py) renders the last three structured rejections into the highest-attention prompt slot. Always prefer these structured diffs over ad-hoc per-site anecdotes.
+- **Challenger lint gate.** [`challenger_lint.py`](backend/app/ml/champion_challenger/challenger_lint.py) runs immediately after Codex writes a candidate. Violations trigger exactly one automatic revise pass; a second failure hard-stops the run and records a structured rejection. Design for the linter instead of fighting it.
+- **Fixture gate.** [`backend/tests/fixtures/extractor_smoke/`](backend/tests/fixtures/extractor_smoke/) is the 15-fixture smoke pack. [`verify_challenger.py`](backend/scripts/verify_challenger.py) now requires `>=12/15` passes when the full pack is present. Any change that breaks 4+ fixtures is dead on arrival even before the 179-site A/B.
+- **Evolutionary search scaffolding.** When `EVO_ENABLED=1`, the daemon shells out to [`backend/scripts/evo_cycle.py`](backend/scripts/evo_cycle.py), which drives the new diff-grounded candidate flow under [`backend/app/ml/evo/`](backend/app/ml/evo/). This owns parallel Codex spawning, SEARCH/REPLACE diff application, bandit state, and archive metrics.
+- **Observability.** `/api/v1/ml-models/evo/metrics` exposes the current `storage/evo/metrics.json` view. Use it to track promotion rate, fixture false positives, archive coverage, and bandit entropy as the search loop evolves.
+
 ### Champion/Challenger Infrastructure (landed 2026-04-14)
 
 Beyond the per-iteration A/B test above, the full champion/challenger hardening lives under [`backend/app/ml/champion_challenger/`](backend/app/ml/champion_challenger/):
@@ -269,6 +282,7 @@ Champion/challenger state is persisted into git on every iteration so any fresh 
 
 - `database/models_snapshot.sql` — regenerated from the live DB (TRUNCATE + column-inserts for 10 model tables: `ml_models`, `model_versions`, `experiments`, `codex_improvement_runs`, `metric_snapshots`, `gold_holdout_{sets,domains,jobs}`, `ats_pattern_proposals`, `drift_baselines`).
 - `database/auto_improve_memory.json` / `database/auto_improve_history.json` — mirrors of the live files in `storage/` so Codex's iteration memory survives a clone.
+- `database/play_library.json` — mirror of `storage/play_library/` so successful historical plays survive a clone and can be restored before the next prompt build.
 - `backend/app/crawlers/` — any newly-written `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` code Codex produced since the last commit.
 
 **Commit message format (deterministic, greppable):**
@@ -303,7 +317,7 @@ Rejections use `evaluated` instead of `PROMOTED`. State-only snapshots (trigger-
    - **Champion** — current live model extracts blindly
    - **Challenger** — candidate model extracts blindly
 2. **Score each phase** with the 4-axis composite (capped) above.
-3. **Codex auto-improve** reads failure patterns from the test run + `storage/auto_improve_memory.json` and generates the next `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` iteration. Runs as a host-side daemon (triggered via `/storage/auto_improve_triggers/<model_id>.trigger` files; host-only because `codex` must run outside the container).
+3. **Codex auto-improve** reads failure patterns from the test run + `storage/auto_improve_memory.json` and generates the next `tiered_extractor_vXX.py` / `career_page_finder_vXX.py` iteration. Runs as a host-side daemon (triggered via `/storage/auto_improve_triggers/<model_id>.trigger` files; host-only because `codex` must run outside the container). When `EVO_ENABLED=1`, the daemon shells out to `python -m scripts.evo_cycle` instead of running the legacy sequential loop inline.
 4. **Register** the new version in `ml_models` and wire it into `_FINDER_MAP` in both [`ml_models.py`](backend/app/api/v1/endpoints/ml_models.py) and [`ml_tasks.py`](backend/app/tasks/ml_tasks.py).
 5. **Execute A/B test** → if the promotion gate passes, the challenger is atomically promoted to `live` and the next iteration repeats from step 1 with the new champion as the source. If it fails, the challenger is kept as `tested` and a new improvement run is spawned from the same champion.
 6. **Snapshot into git** — at end of iteration AND on every A/B completion (trigger-file path), the daemon regenerates `database/models_snapshot.sql`, mirrors memory files into `database/`, stages new extractor code, and commits + pushes. See "Git-Tracked Model State" above.
@@ -316,6 +330,8 @@ When acting as the auto-improve agent, follow [`new-prompt.md`](new-prompt.md) a
 - **Always read `storage/auto_improve_memory.json` BEFORE designing, UPDATE it after implementing.**
 - **Query the live champion dynamically** — do NOT hardcode version numbers. `SELECT name FROM ml_models WHERE status = 'live' AND model_type = 'tiered_extractor'`, then `ls -t backend/app/crawlers/tiered_extractor_v*.py | head -1`.
 - **Inherit from the stable base only** — `TieredExtractorV16` (extractors) and `CareerPageFinderV26` (finders). NEVER build inheritance chains deeper than 1 level (your v → stable base, full stop).
+- **Prefer overriding narrower helpers, not `extract()`.** If you must override `extract()`, the body must contain `await super().extract(...)` or `await self._finalize_with_enrichment(...)` or the challenger linter will reject it.
+- **Do not bypass detail enrichment once it is intentionally wired.** `DetailEnricher` is the approved mechanism for bounded detail-page field backfill; use budgeted enrichment instead of open-ended detail crawling.
 - **NEVER add single-site fixes** — every change must help 3+ sites. Prefer platform-level fixes (e.g. a new Workday handler) over pattern-level fixes (e.g. a CSS selector for one site).
 - **Quality over quantity** — 10 real jobs > 50 fake ones. Type 1 false positives are critical.
 - **Don't weaken title/jobset validation** to fix false negatives — it always creates more false positives than it fixes.
@@ -334,14 +350,20 @@ A valid extracted job MUST have:
 - [`tiered_extractor_v16.py`](backend/app/crawlers/tiered_extractor_v16.py) — stable base. **DO NOT MODIFY.**
 - [`tiered_extractor_v60.py`](backend/app/crawlers/tiered_extractor_v60.py) — v6.0 consolidated reference. **DO NOT MODIFY.**
 - [`tiered_extractor_v69.py`](backend/app/crawlers/tiered_extractor_v69.py) — **current live champion.**
+- [`tiered_extractor_v610.py`](backend/app/crawlers/tiered_extractor_v610.py) — hotfix candidate: `v6.9 + DetailEnricher`, intentionally minimal.
 - [`tiered_extractor_vXX.py`](backend/app/crawlers/) — challenger iterations (highest-numbered file ≠ champion; champion is whichever has `status='live'` in DB).
 - [`career_page_finder_v26.py`](backend/app/crawlers/career_page_finder_v26.py) — proven discovery. **DO NOT MODIFY.**
 - [`career_page_finder_v69.py`](backend/app/crawlers/career_page_finder_v69.py) — finder paired with the current champion.
+- [`career_page_finder_v610.py`](backend/app/crawlers/career_page_finder_v610.py) — finder paired with the v6.10 hotfix candidate.
 - [`storage/auto_improve_memory.json`](storage/auto_improve_memory.json) — iteration history + anti-patterns (READ before, UPDATE after). Mirrored into git at [`database/auto_improve_memory.json`](database/auto_improve_memory.json) by the daemon.
+- [`storage/play_library/`](storage/play_library/) — per-play exemplars for successful promotions. Mirrored into git at [`database/play_library.json`](database/play_library.json).
 - [`new-prompt.md`](new-prompt.md) — auto-improve agent prompt.
 - [`backend/app/ml/champion_challenger/`](backend/app/ml/champion_challenger/) — registry, promotion, drift, ATS quarantine, latency, orchestrator (hardened loop).
+- [`backend/app/ml/champion_challenger/challenger_lint.py`](backend/app/ml/champion_challenger/challenger_lint.py) — AST guardrail for inheritance depth, extract-flow preservation, method/LOC budget, and banned approaches.
+- [`backend/app/ml/evo/`](backend/app/ml/evo/) — evolutionary-search scaffolding (diff format, Codex runner, bandit, archive, population).
 - [`backend/scripts/build_gold_holdout.py`](backend/scripts/build_gold_holdout.py) — materialise a frozen GOLD holdout from `lead_imports`.
 - [`backend/scripts/auto_improve_daemon.py`](backend/scripts/auto_improve_daemon.py) — host-side daemon. `commit_model_snapshot` + `_process_snapshot_triggers` implement the git-commit path.
+- [`backend/scripts/evo_cycle.py`](backend/scripts/evo_cycle.py) — CLI wrapper for one asynchronous evolutionary-search cycle.
 - [`database/dump_models.sh`](database/dump_models.sh) — models-only SQL dump (invoked by the daemon; see "Git-Tracked Model State").
 - [`database/models_snapshot.sql`](database/models_snapshot.sql) — committed champion/challenger state. Regenerated every iteration.
 

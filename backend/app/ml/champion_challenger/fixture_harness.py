@@ -29,9 +29,9 @@ we're working offline:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol
@@ -67,6 +67,7 @@ class FixtureResult:
     ats_platform: Optional[str]
     fields_score: float
     quality_passed: bool
+    expected_job_count: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -93,10 +94,9 @@ class FixtureReport:
         # volume: per-fixture ratio (extracted / expected), symmetric penalty
         volumes = []
         for r in valid:
-            expected = None
-            if r.matched_titles:
+            expected = r.expected_job_count
+            if expected is None and r.matched_titles:
                 expected = max(r.matched_titles, 1)
-            # matched_titles preferred; falls through to extracted_count based soft check
             if expected is None and r.extracted_count == 0:
                 volumes.append(0.0)
                 continue
@@ -212,7 +212,7 @@ class FixtureHarness:
     @classmethod
     def from_storage(
         cls,
-        root: str = os.environ.get("FIXTURE_HARNESS_ROOT", "storage/gold_holdout"),
+        root: str = os.environ.get("FIXTURE_HARNESS_ROOT", "backend/tests/fixtures/extractor_smoke"),
         *,
         limit: Optional[int] = None,
     ) -> "FixtureHarness":
@@ -228,15 +228,27 @@ class FixtureHarness:
         """
         root_path = Path(root)
         fixtures: list[Fixture] = []
-        if not root_path.exists():
+        candidates = [
+            root_path,
+            Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "extractor_smoke",
+            Path(__file__).resolve().parents[4] / root,
+            Path("storage/gold_holdout"),
+        ]
+        resolved = next((candidate for candidate in candidates if candidate.exists()), None)
+        if resolved is None:
             logger.warning("fixture_harness: %s does not exist", root_path)
+            return cls(fixtures)
+        root_path = resolved
+        manifest_path = root_path / "manifest.json"
+        if manifest_path.exists():
+            fixtures = cls._fixtures_from_manifest(manifest_path, limit=limit)
+            logger.info("fixture_harness: loaded %d fixtures from %s", len(fixtures), manifest_path)
             return cls(fixtures)
         for html_path in sorted(root_path.rglob("*.html")):
             meta_path = html_path.parent / "meta.json"
             meta = {}
             if meta_path.exists():
                 try:
-                    import json
                     meta = json.loads(meta_path.read_text())
                 except Exception:  # noqa: BLE001
                     meta = {}
@@ -253,23 +265,39 @@ class FixtureHarness:
         logger.info("fixture_harness: discovered %d fixtures under %s", len(fixtures), root_path)
         return cls(fixtures)
 
+    @staticmethod
+    def _fixtures_from_manifest(manifest_path: Path, *, limit: Optional[int]) -> list[Fixture]:
+        payload = json.loads(manifest_path.read_text())
+        root = manifest_path.parent
+        fixtures: list[Fixture] = []
+        for item in payload[:limit]:
+            fixtures.append(
+                Fixture(
+                    domain=item["domain"],
+                    url=item["url"],
+                    snapshot_path=root / item["snapshot_path"],
+                    expected_titles=list(item.get("expected_titles") or []),
+                    expected_job_count=item.get("expected_job_count"),
+                    ats_platform=item.get("ats_platform"),
+                )
+            )
+        return fixtures
+
     # --- Execution ---------------------------------------------------------
 
     async def run(self, extractor: ExtractorProtocol) -> FixtureReport:
         import time
         start = time.monotonic()
-        results: list[FixtureResult] = []
-
-        for fix in self.fixtures:
+        async def _run_fixture(fix: Fixture) -> FixtureResult:
             try:
                 html = fix.snapshot_path.read_bytes().decode("utf-8", errors="replace")
             except Exception as e:  # noqa: BLE001
-                results.append(FixtureResult(
+                return FixtureResult(
                     domain=fix.domain, extracted_count=0, matched_titles=0,
                     ats_platform=fix.ats_platform, fields_score=0.0,
-                    quality_passed=False, error=f"load-failed: {e}",
-                ))
-                continue
+                    quality_passed=False, expected_job_count=fix.expected_job_count,
+                    error=f"load-failed: {e}",
+                )
 
             try:
                 jobs = await extractor.extract(
@@ -277,24 +305,27 @@ class FixtureHarness:
                     _StubCompany(fix.ats_platform),
                     html,
                 )
-            except Exception as e:  # noqa: BLE001 — one fixture must never abort the run
-                results.append(FixtureResult(
+            except Exception as e:  # noqa: BLE001
+                return FixtureResult(
                     domain=fix.domain, extracted_count=0, matched_titles=0,
                     ats_platform=fix.ats_platform, fields_score=0.0,
-                    quality_passed=False, error=f"extract-failed: {e}",
-                ))
-                continue
+                    quality_passed=False, expected_job_count=fix.expected_job_count,
+                    error=f"extract-failed: {e}",
+                )
 
             extracted_titles = [(j.get("title") or "") for j in (jobs or []) if isinstance(j, dict)]
             matched = _count_fuzzy_matches(fix.expected_titles, extracted_titles)
-            results.append(FixtureResult(
+            return FixtureResult(
                 domain=fix.domain,
                 extracted_count=len(jobs or []),
                 matched_titles=matched,
                 ats_platform=fix.ats_platform,
                 fields_score=_fields_score(jobs or []),
                 quality_passed=_quality_passed(jobs or []),
-            ))
+                expected_job_count=fix.expected_job_count,
+            )
+
+        results = list(await asyncio.gather(*(_run_fixture(fix) for fix in self.fixtures)))
 
         elapsed = time.monotonic() - start
         return FixtureReport(fixtures_total=len(self.fixtures), results=results, elapsed_s=elapsed)

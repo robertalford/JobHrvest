@@ -1,5 +1,8 @@
 ## 2026-04-15
 
+- Fixed the live auto-improve path ignoring the already-built detail-page enrichment layer by introducing `TieredExtractorV610`, a budgeted `v6.9 + DetailEnricher` hotfix candidate.
+- Fixed repeated "broad rewrite, same root-cause miss" auto-improve loops by adding structured site diff packages, recent rejection post-mortems, and AST-based challenger linting ahead of fixture/A-B evaluation.
+- Fixed weak fixture gating that let "some fixtures pass, many regress" challengers through by curating a 15-fixture smoke corpus and tightening verifier success to `>=12/15`.
 - Fixed pagination controls being emitted as jobs (for example `Show 8 more`) by adding a generic post-extraction non-job filter in `TieredExtractorV70`.
 - Fixed section-heading leakage (`Working with us`) in linked-card outputs by extending the same v7.0 post-filter to reject obvious non-role labels.
 - Preserved extraction volume while improving quality/coverage on the v7.0 fixture harness: job count unchanged, non-job titles reduced to zero, and description/location fill significantly improved via the existing v7.0 listing-context enrichment.

@@ -1,5 +1,6 @@
 """ML/classifier Celery tasks."""
 
+import json
 import logging
 from datetime import datetime, timezone
 from app.tasks.celery_app import celery_app
@@ -266,6 +267,36 @@ def enrich_job_descriptions(limit: int = 150):
     asyncio.run(_run())
 
 
+@celery_app.task(name="ml.record_challenger_postmortem", queue="ml")
+def record_challenger_postmortem(run_id: str):
+    import asyncio
+    from app.db.base import AsyncSessionLocal
+    from app.models.ml_model import MLModel, MLModelTestRun
+    from app.ml.champion_challenger.failure_analysis import write_postmortem
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            run = await db.get(MLModelTestRun, run_id)
+            if not run or not run.results_detail:
+                return
+            model = await db.get(MLModel, run.model_id)
+            summary = (run.results_detail or {}).get("summary") or {}
+            challenger = summary.get("challenger_composite") or {}
+            reasons = summary.get("promotion_decision", {}).get("reasons", {})
+            gate_failures = [key for key, passed in reasons.items() if not passed]
+            write_postmortem(
+                model.name if model else "",
+                {
+                    "gate_failures": gate_failures,
+                    "axes_delta": challenger,
+                    "composite": challenger.get("composite"),
+                    "fixture_score": None,
+                },
+            )
+
+    asyncio.run(_run())
+
+
 async def _fetch_description(job: "Job", company: "Company") -> str:
     """
     Fetch job detail page and extract description using the full
@@ -519,7 +550,7 @@ def _pick_extractor(name: str):
     from app.crawlers.tiered_extractor import TieredExtractor
     match = re.search(r"v(\d+)\.(\d+)", name)
     if match:
-        file_ver = int(match.group(1)) * 10 + int(match.group(2))
+        file_ver = int(f"{match.group(1)}{match.group(2)}")
         try:
             mod = importlib.import_module(f"app.crawlers.tiered_extractor_v{file_ver}")
             return getattr(mod, f"TieredExtractorV{file_ver}")
@@ -537,6 +568,7 @@ def _pick_finder(name: str):
     """
     import importlib, re
     _FINDER_MAP = {
+        610: 610,  # v6.10 hotfix
         70: 70,  # v7.0 challenger
         69: 69,  # v6.9 champion
         60: 60,  # v6.0 consolidated
@@ -546,7 +578,7 @@ def _pick_finder(name: str):
     }
     match = re.search(r"v(\d+)\.(\d+)", name)
     if match:
-        file_ver = int(match.group(1)) * 10 + int(match.group(2))
+        file_ver = int(f"{match.group(1)}{match.group(2)}")
         finder_ver = _FINDER_MAP.get(file_ver, file_ver)
         try:
             mod = importlib.import_module(f"app.crawlers.career_page_finder_v{finder_ver}")
@@ -1117,7 +1149,7 @@ async def _aggregate(
 ):
     from collections import Counter
     from uuid import UUID as _UUID
-    from sqlalchemy import select
+    from sqlalchemy import select, text as sa_text
     from app.db.base import AsyncSessionLocal
     from app.models.ml_model import MLModel, MLModelTestRun
     from app.api.v1.endpoints.ml_models import (
@@ -1333,6 +1365,25 @@ async def _aggregate(
 
             run.results_detail = {"sites": site_results, "summary": summary}
 
+            try:
+                await db.execute(
+                    sa_text(
+                        "INSERT INTO evo_population_events (cycle_id, version_tag, event, payload) "
+                        "VALUES (:cycle_id, :version_tag, :event, CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "cycle_id": (run.test_config or {}).get("evo_cycle_id"),
+                        "version_tag": model.name,
+                        "event": "aggregate_completed",
+                        "payload": json.dumps({
+                            "promoted": bool(should_promote),
+                            "gate_verdict": summary.get("promotion_decision", {}).get("reasons", {}),
+                        }),
+                    },
+                )
+            except Exception:
+                pass
+
             # Universality infrastructure: record history, ratchet ever-passed
             # set. Done regardless of promotion decision — we learn from every
             # run.
@@ -1358,6 +1409,12 @@ async def _aggregate(
                 logger.warning("stability persistence failed: %s", stab_err)
 
             await db.commit()
+
+            if not should_promote:
+                try:
+                    record_challenger_postmortem.delay(run_id)
+                except Exception as postmortem_err:  # noqa: BLE001
+                    logger.warning("postmortem scheduling failed: %s", postmortem_err)
 
             if (run.test_config or {}).get("auto_improve", auto_improve):
                 import os as _os, json as _j2

@@ -78,6 +78,41 @@ def _weakest_axis(axes: dict) -> str:
     return min(axes, key=lambda k: axes.get(k, 100))
 
 
+def _truncate_bytes(text: str, limit: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[: max(0, limit - 3)].decode("utf-8", errors="ignore") + "..."
+
+
+def _load_previous_fixture_report(current_name: str) -> str:
+    report_dir = os.path.join(os.path.dirname(PROJECT_DIR), "storage", "auto_improve_fixture_reports")
+    if not os.path.isdir(report_dir):
+        return "_no fixture report found_"
+    preferred = os.path.join(report_dir, f"{current_name.replace('.', '')}.json")
+    candidates = [preferred] if os.path.exists(preferred) else []
+    if not candidates:
+        candidates = sorted(
+            (os.path.join(report_dir, name) for name in os.listdir(report_dir) if name.endswith(".json")),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+    if not candidates:
+        return "_no fixture report found_"
+    try:
+        with open(candidates[0]) as fh:
+            payload = json.load(fh)
+        challenger = payload.get("challenger") or {}
+        return (
+            f"fixtures={challenger.get('fixtures', '?')}, "
+            f"passed={challenger.get('fixtures_passed', '?')}, "
+            f"composite={challenger.get('composite', '?')}, "
+            f"axes={json.dumps(challenger.get('axes') or {})}"
+        )
+    except Exception:
+        return "_fixture report unreadable_"
+
+
 def _build_current_champion_head(current_model: dict, token: str | None = None) -> str:
     """Queries the live champion + recent memory and returns a compact Markdown
     block that leads the prompt. This is the ONE place Codex learns what the
@@ -115,35 +150,38 @@ def _build_current_champion_head(current_model: dict, token: str | None = None) 
     # fall through to a minimal block — losing these signals is degradation,
     # not a failure mode.
     recent_changes = "_memory_store unavailable_"
+    recent_rejections = "_memory_store unavailable_"
     banned = "_memory_store unavailable_"
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(PROJECT_DIR), "backend"))
         from app.ml.champion_challenger import memory_store  # type: ignore
         mem = memory_store.load()
         recent_changes = memory_store.render_recent_changes_for_prompt(mem, max_items=3)
+        recent_rejections = memory_store.render_recent_rejections_for_prompt(mem, max_items=3)
         banned = memory_store.render_banned_for_prompt(mem)
     except Exception as e:
         print(f"[auto_improve] memory_store unavailable: {e}")
 
-    return f"""## CURRENT CHAMPION (queried live, 2026-04-14 reset baseline)
-
-Champion: **{champion_name}**   Composite: **{composite}**
-Axes: discovery {axes['discovery']} · quality {axes['quality_extraction']} · volume {axes['volume_accuracy']} · field-completeness {axes['field_completeness']}
-Target axis this run: **{weak_axis}**   Gap to 90: **{gap_to_90:.1f}**
-
-**Hard rule:** do NOT regress any axis currently ≥95. Each axis is capped at 100 — values above 100 indicate extraction bugs, not wins.
-
-## RECENT PLATFORM CHANGES (last 3 promotions)
-
-{recent_changes}
-
-## BANNED APPROACHES (recently regressed — do NOT retry this iteration)
-
-{banned}
-
----
-
-"""
+    return "\n".join([
+        _truncate_bytes(
+            f"## CURRENT CHAMPION\n\n"
+            f"Champion: **{champion_name}**   Composite: **{composite}**\n"
+            f"Axes: discovery {axes['discovery']} · quality {axes['quality_extraction']} · volume {axes['volume_accuracy']} · field-completeness {axes['field_completeness']}\n"
+            f"Target axis this run: **{weak_axis}**   Gap to 90: **{gap_to_90:.1f}**\n",
+            400,
+        ),
+        _truncate_bytes(f"## LAST 3 REJECTION POST-MORTEMS\n\n{recent_rejections}\n", 1200),
+        _truncate_bytes(f"## RECENT PLATFORM CHANGES\n\n{recent_changes}\n", 1200),
+        _truncate_bytes(f"## BANNED APPROACHES\n\n{banned}\n", 400),
+        _truncate_bytes(
+            "## FOCUS DIRECTIVE\n\n"
+            "Do not regress axes already at or above 95. Prefer overriding `_extract_raw` "
+            "or narrower extractor helpers instead of replacing `extract()` unless the "
+            "change is explicitly about enrichment finalization.\n",
+            600,
+        ),
+        "---\n",
+    ])
 
 
 def get_token() -> str:
@@ -364,6 +402,23 @@ def analyse_results(run: dict, context_dir: str) -> dict:
             f["detail_html_file"] = detail_file
             f["detail_url"] = detail_url
 
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(PROJECT_DIR), "backend"))
+            from app.ml.champion_challenger.failure_analysis import build_site_diff_package  # type: ignore
+
+            diff_package = build_site_diff_package(
+                f,
+                html_file=f.get("html_file"),
+                detail_html_file=f.get("detail_html_file"),
+            )
+            diff_file = os.path.join(context_dir, f"diff_{kind}_{i+1}_{slug}.json")
+            with open(diff_file, "w", encoding="utf-8") as fh:
+                json.dump(diff_package, fh, ensure_ascii=False, separators=(",", ":"))
+            f["diff_package_file"] = diff_file
+            f["diff_package"] = diff_package
+        except Exception as e:  # noqa: BLE001
+            print(f"[auto_improve] could not build site diff package for {slug}: {e}")
+
     # Spot-check successes
     spot_checks = random.sample(successes, min(3, len(successes)))
     for i, s in enumerate(spot_checks):
@@ -420,9 +475,11 @@ def determine_next_version(current_name: str) -> str:
             pass
 
     next_file_ver = max_file_ver + 1
-    major = next_file_ver // 10
-    minor = next_file_ver % 10
-    return f"v{major}.{minor}"
+    if 600 <= next_file_ver < 700:
+        return f"v6.{next_file_ver - 600}"
+    if 100 <= next_file_ver < 200:
+        return f"v10.{next_file_ver - 100}"
+    return f"v{next_file_ver // 10}.{next_file_ver % 10}"
 
 
 def _regression_alert(current_accuracy: float, best_accuracy: float) -> str:
@@ -445,6 +502,8 @@ def build_prompt(
     best_accuracy: float = 0.66,
     focus_directive: str | None = None,
     token: str | None = None,
+    parent_source: str | None = None,
+    ancestors: list[dict] | None = None,
 ) -> str:
     """Build the improvement prompt for Codex.
 
@@ -597,11 +656,14 @@ impactful single change under this directive and resist scope creep.
                     example_files.append(f"  - {os.path.basename(fp)}  ({key})")
                     break
         examples_block = "\n".join(example_files) if example_files else "  (no HTML captured)"
+        rep_pkg = entries[0].get("diff_package") if entries and entries[0].get("diff_package") else {}
+        rep_diff = _truncate_bytes(json.dumps(rep_pkg, ensure_ascii=False, separators=(",", ":")), 800) if rep_pkg else "{}"
 
         cards_text += f"""
 --- Pattern Card {card_num}: ATS = {ats_label} ({len(entries)} sites) ---
 Aggregate: baseline={total_b} jobs, model={total_m} jobs ({vr:.0%}), hard-failures={hard_fails}
 Shared baseline wrapper hint: {hint_json}
+Representative diff package: {rep_diff}
 Sample HTML files (anonymised, in {context_dir}):
 {examples_block}
 
@@ -640,6 +702,7 @@ Context files (READ THESE for full analysis):
   HTML (model's discovered page): {f.get('html_file', 'N/A')}
   HTML (baseline's test URL):     {f.get('baseline_html_file', 'same as above')}
   Full wrapper config (JSON):     {f.get('wrapper_file', 'N/A')}
+  Diff package (JSON):            {f.get('diff_package_file', 'N/A')}
   Company: {f['company']}  |  Domain: {f['domain']}  (use for reference only)
 """
 
@@ -832,15 +895,31 @@ FIX THEM FIRST. A model improvement is worthless if the extractor can't even imp
     # Codex to the current champion + target axis + banned approaches. Below it
     # come the per-iteration brief, exemplars, and the canonical base prompt.
     head_section = _build_current_champion_head(current_model, token=token)
+    fixture_report = _load_previous_fixture_report(current_name)
+    diff_mode = ""
+    if parent_source:
+        ancestor_lines = "\n".join(
+            f"- {a.get('version_tag')}: {a.get('summary') or a.get('gate_verdict') or 'ancestor reference'}"
+            for a in (ancestors or [])[:3]
+        )
+        diff_mode = _truncate_bytes(
+            "## DIFF-GROUNDED MUTATION MODE\n\n"
+            "Return only SEARCH/REPLACE blocks in this exact format:\n"
+            "<<<<<<< SEARCH\n<exact parent lines>\n=======\n<replacement>\n>>>>>>> REPLACE\n\n"
+            f"Ancestors:\n{ancestor_lines or '- none'}\n\n"
+            f"Parent source:\n```python\n{parent_source}\n```\n",
+            3500,
+        )
 
-    prompt = f"""{head_section}{brief_section}
-{plays_section}
-{focus_section}
+    prompt = f"""{head_section}{_truncate_bytes(brief_section, 2000)}
+{_truncate_bytes(plays_section, 1500)}
+{_truncate_bytes(focus_section, 600)}
+{diff_mode}
 ---
 
-{base_prompt}
+{_truncate_bytes(base_prompt, 6000)}
 {self_improvement_section}
-{trend_section}
+{_truncate_bytes(trend_section, 400)}
 ---
 
 ## THIS ITERATION — Dynamic Test Results
@@ -877,7 +956,7 @@ block** any change that regresses an existing passing cluster by more than
 passed (ever-passed gate), or that fails a site currently flagged as
 oscillating. Optimise for the pattern, not the site.
 
-{cards_text if cards_text.strip() else "No failing clusters of ≥3 sites — the remaining long-tail is below."}
+{_truncate_bytes(cards_text if cards_text.strip() else "No failing clusters of ≥3 sites — the remaining long-tail is below.", 2500)}
 
 ### Long-tail — single/paired failures (analyse for root cause, not selectors)
 
@@ -885,7 +964,7 @@ These sites each represent a platform with only 1–2 failing instances today.
 They are NOT promotion-blocking on their own (cluster gate requires ≥3 sites)
 but they're a seedbed for tomorrow's clusters. Look for SHARED root causes.
 
-{failures_text if failures_text.strip() else "No long-tail failures this run."}
+{_truncate_bytes(failures_text if failures_text.strip() else "No long-tail failures this run.", 1500)}
 
 ### Volume/Quality Gaps
 
@@ -898,6 +977,10 @@ drill-down for gaps that don't fit a ≥3-site cluster:
 ### Spot-Check Successes
 
 {spot_check_text if spot_check_text.strip() else "No successes to spot-check."}
+
+### Previous Fixture Report
+
+{_truncate_bytes(fixture_report, 800)}
 
 ### Context Files (MUST READ)
 

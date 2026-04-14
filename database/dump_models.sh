@@ -35,6 +35,9 @@ TABLES=(
     gold_holdout_jobs
     ats_pattern_proposals
     drift_baselines
+    evo_individuals
+    evo_cycles
+    evo_population_events
 )
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then

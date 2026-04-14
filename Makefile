@@ -50,6 +50,7 @@ models-restore: ## Restore champion/challenger models + history from database/mo
 	@mkdir -p storage
 	@test -f database/auto_improve_memory.json && cp database/auto_improve_memory.json storage/auto_improve_memory.json || echo "(no memory mirror to restore)"
 	@test -f database/auto_improve_history.json && cp database/auto_improve_history.json storage/auto_improve_history.json || echo "(no history mirror to restore)"
+	@test -f database/play_library.json && PYTHONPATH=backend python3 -c "from app.ml.champion_challenger.play_library import default_library; print(f'restored {default_library.restore_snapshot()} plays')" || echo "(no play-library snapshot to restore)"
 	@echo "✅ Models + memory restored from database/models_snapshot.sql"
 
 models-snapshot: ## Manually regenerate + commit + push models snapshot (daemon does this automatically per iteration)
@@ -57,7 +58,8 @@ models-snapshot: ## Manually regenerate + commit + push models snapshot (daemon 
 	@mkdir -p database
 	@test -f storage/auto_improve_memory.json && cp storage/auto_improve_memory.json database/auto_improve_memory.json || true
 	@test -f storage/auto_improve_history.json && cp storage/auto_improve_history.json database/auto_improve_history.json || true
-	git add database/models_snapshot.sql database/auto_improve_memory.json database/auto_improve_history.json backend/app/crawlers/ || true
+	@PYTHONPATH=backend python3 -c "from app.ml.champion_challenger.play_library import default_library; default_library.write_snapshot()" || true
+	git add database/models_snapshot.sql database/auto_improve_memory.json database/auto_improve_history.json database/play_library.json backend/app/crawlers/ || true
 	@if git diff --cached --quiet; then echo "No model changes to commit"; else \
 		git commit -m "chore(models): manual snapshot via make models-snapshot" && \
 		git push origin main || echo "⚠️ push deferred (commit stays local)"; \

@@ -52,8 +52,51 @@ class TestRunCreate(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _fetch_live_progress(run_id) -> tuple[list[dict], int]:
+    """For an in-progress test run, read partial per-site results from Redis.
+
+    test_single_site() in ml_tasks stores results keyed by site_index in a Redis
+    hash `test_run:{id}:results` and a counter at `test_run:{id}:count`. We read
+    them here so the Models UI can show per-row progress mid-run, rather than
+    waiting for the final aggregation (which can take 5–20 minutes for 179 sites).
+    Returns ([sites], completed_count). Failures are non-fatal — empty tuple.
+    """
+    try:
+        import json as _json
+        import redis
+        from app.core.config import settings
+        r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
+        key = f"test_run:{run_id}:results"
+        count_key = f"test_run:{run_id}:count"
+        raw = r.hgetall(key)
+        completed_raw = r.get(count_key)
+        completed = int(completed_raw) if completed_raw else len(raw or {})
+        if not raw:
+            return [], completed
+        parsed: list[tuple[int, dict]] = []
+        for k, v in raw.items():
+            try:
+                idx = int(k.decode() if isinstance(k, (bytes, bytearray)) else k)
+                parsed.append((idx, _json.loads(v)))
+            except Exception:
+                continue
+        parsed.sort(key=lambda p: p[0])
+        return [p[1] for p in parsed], completed
+    except Exception:
+        return [], 0
+
+
 def _serialize_test_run(tr: MLModelTestRun, *, compact: bool = False) -> dict:
     rd = tr.results_detail or {}
+    # Live-progress overlay: while a run is still in flight, the final
+    # `results_detail` blob hasn't been written yet (aggregation happens at the
+    # end). Pull partial per-site results from Redis so the table can show
+    # interim baseline/champion/challenger columns as each site completes.
+    live_completed = 0
+    if tr.status == "running":
+        live_sites, live_completed = _fetch_live_progress(tr.id)
+        if live_sites:
+            rd = {**rd, "sites": live_sites}
     summary = rd.get("summary", {}) if isinstance(rd, dict) else {}
 
     # Build column summaries for 3-column display
@@ -143,6 +186,29 @@ def _serialize_test_run(tr: MLModelTestRun, *, compact: bool = False) -> dict:
     # Get labels from test_config
     test_config = tr.test_config or {}
 
+    total_sites = tr.total_tests or 0
+    # Build the results_detail payload. For in-flight runs, merge live progress
+    # into rd so the UI's existing `rd.progress` + `rd.sites` code path picks it
+    # up without any frontend change.
+    if tr.status == "running":
+        rd = {
+            **(rd or {}),
+            "progress": {
+                "done": live_completed or len(rd.get("sites", []) or []),
+                "total": total_sites,
+            },
+        }
+
+    if compact:
+        compact_rd: dict | None = None
+        if rd:
+            compact_rd = {"summary": rd.get("summary", {})}
+            if tr.status == "running":
+                compact_rd["progress"] = rd.get("progress")
+        results_detail_out = compact_rd
+    else:
+        results_detail_out = rd or tr.results_detail
+
     return {
         "id": str(tr.id),
         "model_id": str(tr.model_id),
@@ -155,13 +221,7 @@ def _serialize_test_run(tr: MLModelTestRun, *, compact: bool = False) -> dict:
         "recall": tr.recall,
         "f1_score": tr.f1_score,
         "test_config": tr.test_config,
-        "results_detail": (
-            # Compact mode: include only summary (with composite scores), not full site data
-            {"summary": (tr.results_detail or {}).get("summary", {})}
-            if compact and tr.results_detail
-            else None if compact
-            else tr.results_detail
-        ),
+        "results_detail": results_detail_out,
         "status": tr.status,
         "started_at": tr.started_at.isoformat() if tr.started_at else None,
         "completed_at": tr.completed_at.isoformat() if tr.completed_at else None,
@@ -640,6 +700,64 @@ async def get_auto_improve_activity(
         "model": model_id,
         "log_file": os.path.basename(latest),
     }
+
+
+@router.get("/evo/metrics")
+async def get_evo_metrics():
+    """Return lightweight evolutionary-search health metrics."""
+    import json as _json
+    import math as _math
+    import os as _os
+
+    root = "/storage/evo"
+    metrics_path = _os.path.join(root, "metrics.json")
+    if _os.path.exists(metrics_path):
+        try:
+            with open(metrics_path) as f:
+                return _json.load(f)
+        except Exception:
+            pass
+
+    payload = {
+        "promotion_rate_per_cycle": None,
+        "time_to_next_promotion_hours": None,
+        "field_completeness": None,
+        "champion_composite": None,
+        "fixture_false_positive_rate": None,
+        "codex_wall_time_median_min_per_iteration": None,
+        "cycle_wall_time_median_min": None,
+        "island_diversity": None,
+        "archive_coverage": 0.0,
+        "bandit_entropy": None,
+    }
+
+    archive_path = _os.path.join(root, "archive.json")
+    if _os.path.exists(archive_path):
+        try:
+            with open(archive_path) as f:
+                archive = _json.load(f)
+            cells = archive.get("archive", archive)
+            payload["archive_coverage"] = round(len(cells) / 44.0, 4) if cells else 0.0
+        except Exception:
+            pass
+
+    bandit_path = _os.path.join(root, "bandit.json")
+    if _os.path.exists(bandit_path):
+        try:
+            with open(bandit_path) as f:
+                bandit = _json.load(f)
+            means = []
+            for axis in bandit.values():
+                alpha = float(axis.get("alpha", 1.0))
+                beta = float(axis.get("beta", 1.0))
+                means.append(alpha / max(1e-9, alpha + beta))
+            total = sum(means) or 1.0
+            probs = [value / total for value in means if value > 0]
+            payload["bandit_entropy"] = round(-sum(p * _math.log2(p) for p in probs), 4) if probs else None
+        except Exception:
+            pass
+
+    return payload
 
 
 @router.post("/auto-improve/stop")
@@ -1562,8 +1680,7 @@ async def execute_test_run(
         match = re.search(r"v(\d+)\.(\d+)", name)
         if match:
             major, minor = int(match.group(1)), int(match.group(2))
-            # Map model version to file version (v1.6 → v16, v2.1 → v21)
-            file_ver = major * 10 + minor
+            file_ver = int(f"{major}{minor}")
             module_name = f"app.crawlers.tiered_extractor_v{file_ver}"
             class_name = f"TieredExtractorV{file_ver}"
             try:
@@ -1578,6 +1695,7 @@ async def execute_test_run(
     # remain. Next challenger versions will add themselves via _FINDER_MAP updates
     # when their extractor + finder files are created.
     _FINDER_MAP = {
+        610: 610,  # v6.10 hotfix
         70: 70,  # v7.0 challenger
         69: 69,  # v6.9 champion
         60: 60,  # v6.0 consolidated reference
@@ -1590,7 +1708,7 @@ async def execute_test_run(
         match = re.search(r"v(\d+)\.(\d+)", name)
         if match:
             major, minor = int(match.group(1)), int(match.group(2))
-            file_ver = major * 10 + minor
+            file_ver = int(f"{major}{minor}")
             # Check explicit mapping first, then try direct version match
             finder_ver = _FINDER_MAP.get(file_ver, file_ver)
             module_name = f"app.crawlers.career_page_finder_v{finder_ver}"

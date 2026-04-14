@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 def _resolve_default_path() -> Path:
     """Resolve the memory file path.
 
@@ -96,12 +98,16 @@ def append_promotion(
     path: Path | str | None = None,
 ) -> dict[str, Any]:
     data = load(path)
+    play_meta = _summarize_promotion_with_ollama(diff_summary=diff_summary or "", axes=axes or {})
     entry = {
         "version": version,
         "composite": round(float(composite), 1),
         "axes": {k: round(float(v), 1) for k, v in axes.items()},
         "summary": summary[:200],
         "diff_summary": (diff_summary or "")[:240],
+        "diff_keywords": play_meta.get("diff_keywords") or [],
+        "ats_clusters_fixed": play_meta.get("ats_clusters_fixed") or [],
+        "notes": play_meta.get("notes"),
         "test_run_id": test_run_id,
         "promoted_at": _now(),
     }
@@ -126,9 +132,9 @@ def append_promotion(
             summary=summary[:200],
             axis_deltas={k: round(float(v), 2) for k, v in champ_axes.items()},
             composite_delta=composite_delta,
-            ats_clusters_fixed=[],
-            diff_keywords=[],
-            notes=(diff_summary or None),
+            ats_clusters_fixed=play_meta.get("ats_clusters_fixed") or [],
+            diff_keywords=play_meta.get("diff_keywords") or [],
+            notes=play_meta.get("notes") or (diff_summary or None),
         ))
     except Exception as e:  # noqa: BLE001
         import logging
@@ -139,8 +145,13 @@ def append_promotion(
 
 def append_rejection(
     version: str,
-    reason: str,
+    reason: str | None = None,
     *,
+    gate_failures: list[str] | None = None,
+    axes_delta: dict[str, float] | None = None,
+    symptom: str | None = None,
+    likely_cause: str | None = None,
+    rule_for_future: str | None = None,
     fixture_score: float | None = None,
     composite: float | None = None,
     path: Path | str | None = None,
@@ -148,7 +159,12 @@ def append_rejection(
     data = load(path)
     entry = {
         "version": version,
-        "reason": reason[:240],
+        "reason": (reason or symptom or likely_cause or "")[:240],
+        "gate_failures": list(gate_failures or []),
+        "axes_delta": {k: round(float(v), 2) for k, v in (axes_delta or {}).items()},
+        "symptom": (symptom or reason or "")[:240],
+        "likely_cause": (likely_cause or "")[:240],
+        "rule_for_future": (rule_for_future or "")[:240],
         "fixture_score": fixture_score,
         "composite": composite,
         "rejected_at": _now(),
@@ -222,6 +238,20 @@ def render_recent_changes_for_prompt(data: dict[str, Any] | None = None, max_ite
     return "\n".join(lines)
 
 
+def render_recent_rejections_for_prompt(data: dict[str, Any] | None = None, max_items: int = 3) -> str:
+    data = data or load()
+    rejects = data.get("recent_rejections", [])[:max_items]
+    if not rejects:
+        return "_none — no recent challenger rejections recorded_"
+    lines = []
+    for item in rejects:
+        causes = item.get("likely_cause") or item.get("reason") or "unknown cause"
+        rule = item.get("rule_for_future") or "avoid repeating the same broad fix"
+        gates = ", ".join(item.get("gate_failures") or []) or "unknown gate"
+        lines.append(f"- {item['version']} failed `{gates}`: {causes}. Future rule: {rule}")
+    return "\n".join(lines)
+
+
 def render_banned_for_prompt(data: dict[str, Any] | None = None) -> str:
     data = data or load()
     bans = data.get("banned_approaches", [])
@@ -231,3 +261,39 @@ def render_banned_for_prompt(data: dict[str, Any] | None = None) -> str:
         f"- {b['summary']} (reason: {b.get('reason') or 'recently regressed'})"
         for b in bans
     )
+
+
+def _summarize_promotion_with_ollama(*, diff_summary: str, axes: dict[str, float]) -> dict[str, Any]:
+    if not diff_summary.strip():
+        return {"diff_keywords": [], "ats_clusters_fixed": [], "notes": None}
+    try:
+        from app.core.config import settings
+    except Exception:  # noqa: BLE001
+        return {"diff_keywords": [], "ats_clusters_fixed": [], "notes": diff_summary[:240]}
+    prompt = (
+        "Return strict JSON with diff_keywords (list), ats_clusters_fixed (list), notes (string).\n"
+        f"Axes: {json.dumps(axes, default=str)}\n"
+        f"Diff summary: {diff_summary[:3000]}"
+    )
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "format": "json",
+                    "stream": False,
+                    "options": {"temperature": 0.2, "num_predict": 300},
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            parsed = json.loads(payload.get("response", "{}"))
+            return {
+                "diff_keywords": list(parsed.get("diff_keywords") or [])[:8],
+                "ats_clusters_fixed": list(parsed.get("ats_clusters_fixed") or [])[:6],
+                "notes": (parsed.get("notes") or diff_summary[:240])[:240],
+            }
+    except Exception:  # noqa: BLE001
+        return {"diff_keywords": [], "ats_clusters_fixed": [], "notes": diff_summary[:240]}

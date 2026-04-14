@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict iu68Ss0cB6rrzG37wyQSbaZqc58Abdxpo9B8DCTEwhBsJuJKc0fxtnzGvh9SuXd
+\restrict MxHHh2E8asG1AwadDc3dRm9d5nxSqwxhKlNGzPO6M1feha4jEhHMwEXljv60nE9
 
 -- Dumped from database version 16.13
 -- Dumped by pg_dump version 16.13
@@ -431,6 +431,75 @@ CREATE TABLE public.ever_passed_sites (
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     last_updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: evo_cycles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.evo_cycles (
+    cycle_id uuid NOT NULL,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    n_candidates smallint,
+    promoted_tag text,
+    notes jsonb
+);
+
+
+--
+-- Name: evo_individuals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.evo_individuals (
+    version_tag text NOT NULL,
+    ml_model_id uuid,
+    parent_tag text,
+    island_id smallint NOT NULL,
+    focus_axis text NOT NULL,
+    behaviour_cell text NOT NULL,
+    status text NOT NULL,
+    fixture_composite double precision,
+    ab_composite double precision,
+    axes_json jsonb,
+    loc integer,
+    file_path text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone
+);
+
+
+--
+-- Name: evo_population_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.evo_population_events (
+    id bigint NOT NULL,
+    cycle_id uuid,
+    version_tag text,
+    event text NOT NULL,
+    payload jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: evo_population_events_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.evo_population_events_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: evo_population_events_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.evo_population_events_id_seq OWNED BY public.evo_population_events.id;
 
 
 --
@@ -1070,6 +1139,13 @@ CREATE TABLE public.word_filters (
 
 
 --
+-- Name: evo_population_events id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_population_events ALTER COLUMN id SET DEFAULT nextval('public.evo_population_events_id_seq'::regclass);
+
+
+--
 -- Name: site_result_history id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1202,6 +1278,30 @@ ALTER TABLE ONLY public.drift_baselines
 
 ALTER TABLE ONLY public.ever_passed_sites
     ADD CONSTRAINT ever_passed_sites_pkey PRIMARY KEY (url);
+
+
+--
+-- Name: evo_cycles evo_cycles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_cycles
+    ADD CONSTRAINT evo_cycles_pkey PRIMARY KEY (cycle_id);
+
+
+--
+-- Name: evo_individuals evo_individuals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_individuals
+    ADD CONSTRAINT evo_individuals_pkey PRIMARY KEY (version_tag);
+
+
+--
+-- Name: evo_population_events evo_population_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_population_events
+    ADD CONSTRAINT evo_population_events_pkey PRIMARY KEY (id);
 
 
 --
@@ -1528,6 +1628,20 @@ CREATE INDEX crawl_steps_test_data_crawler_id_idx ON public.crawl_steps_test_dat
 --
 
 CREATE INDEX crawl_steps_test_data_crawler_id_step_index_idx ON public.crawl_steps_test_data USING btree (crawler_id, step_index);
+
+
+--
+-- Name: idx_evo_individuals_cell; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_evo_individuals_cell ON public.evo_individuals USING btree (behaviour_cell);
+
+
+--
+-- Name: idx_evo_individuals_island; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_evo_individuals_island ON public.evo_individuals USING btree (island_id, created_at);
 
 
 --
@@ -2218,6 +2332,22 @@ ALTER TABLE ONLY public.crawl_logs
 
 
 --
+-- Name: evo_individuals evo_individuals_ml_model_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_individuals
+    ADD CONSTRAINT evo_individuals_ml_model_id_fkey FOREIGN KEY (ml_model_id) REFERENCES public.ml_models(id) ON DELETE SET NULL;
+
+
+--
+-- Name: evo_population_events evo_population_events_cycle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.evo_population_events
+    ADD CONSTRAINT evo_population_events_cycle_id_fkey FOREIGN KEY (cycle_id) REFERENCES public.evo_cycles(cycle_id) ON DELETE CASCADE;
+
+
+--
 -- Name: experiments experiments_challenger_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2461,5 +2591,5 @@ ALTER TABLE ONLY public.site_templates
 -- PostgreSQL database dump complete
 --
 
-\unrestrict iu68Ss0cB6rrzG37wyQSbaZqc58Abdxpo9B8DCTEwhBsJuJKc0fxtnzGvh9SuXd
+\unrestrict MxHHh2E8asG1AwadDc3dRm9d5nxSqwxhKlNGzPO6M1feha4jEhHMwEXljv60nE9
 

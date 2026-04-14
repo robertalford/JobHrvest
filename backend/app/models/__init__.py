@@ -25,6 +25,9 @@ from app.models.champion_challenger import (
     AtsPatternProposal,
     DriftBaseline,
     InferenceMetricsHourly,
+    EvoIndividual,
+    EvoCycle,
+    EvoPopulationEvent,
 )
 from app.models.universality import EverPassedSite, SiteResultHistory
 
@@ -63,6 +66,9 @@ __all__ = [
     "AtsPatternProposal",
     "DriftBaseline",
     "InferenceMetricsHourly",
+    "EvoIndividual",
+    "EvoCycle",
+    "EvoPopulationEvent",
     "EverPassedSite",
     "SiteResultHistory",
 ]

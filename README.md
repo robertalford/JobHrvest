@@ -77,6 +77,7 @@ make models-restore                  # same step on the server
 The champion/challenger models, A/B history, experiments, metric snapshots, GOLD holdout fixtures, and Codex iteration memory are **committed** into the repo at `database/models_snapshot.sql` (plain SQL, diff-friendly, no Git LFS). Every auto-improve iteration regenerates and commits this file so a clone is always aligned to the current live champion.
 
 - **Restore:** `make models-restore` wraps `psql < database/models_snapshot.sql` (TRUNCATE + INSERT under a transaction) and copies `database/auto_improve_memory.json` / `_history.json` into `storage/` where the running system reads them.
+- **Play library restore:** `make models-restore` also rehydrates `storage/play_library/` from `database/play_library.json` when that snapshot exists, so prompt retrieval keeps working on a fresh clone.
 - **Manual re-snapshot:** `make models-snapshot` regenerates, commits, and pushes on demand (the auto-improve daemon does this automatically at the end of every iteration).
 - **Full-DB disaster-recovery backup** is a separate artefact at `database/jobharvest_latest.dump` (Git LFS, replaced hourly by cron). Use that if you also need jobs/companies/leads, not just model state.
 
@@ -117,5 +118,7 @@ Infrastructure: Colima, Docker Compose, Caddy
 - **Live champion: `v6.9`** — `backend/app/crawlers/tiered_extractor_v69.py` + `backend/app/crawlers/career_page_finder_v69.py`. Crowned 2026-04-14 after re-scoring the full iteration history with the objective capped composite formula.
 - **Benchmark composite:** 85.4 / 100 (discovery 100, quality extraction 100, volume accuracy 96.2, field completeness 45.3) on 179 sites (129 fixed regression + 50 exploration).
 - **Scoring:** the composite is weighted 20% discovery + 30% quality extraction + 25% field completeness + 25% volume accuracy, each axis capped at 100. Promotion requires beating the champion's composite, ≥60% regression accuracy, and zero regressions on champion-passing sites.
-- **Next improvement run** will start from v6.9 as the source and attempt to raise `field_completeness` (the one under-ceiling axis) without giving back quality or volume.
+- **Next hotfix candidate:** `v6.10` (`backend/app/crawlers/tiered_extractor_v610.py`) is a deliberately minimal `v6.9 + DetailEnricher` shipment to test whether bounded detail-page enrichment closes most of the field-completeness gap without perturbing the other axes.
+- **Signal v2:** the auto-improve prompt now carries structured site diff packages, recent rejection post-mortems, a 15-fixture smoke gate (`>=12/15`), and AST-based challenger linting before A/B.
+- **Evo search scaffold:** when `EVO_ENABLED=1`, the daemon shells out to `python -m scripts.evo_cycle`, which uses diff-grounded mutation prompts, SEARCH/REPLACE application, and persisted `storage/evo/*.json` metrics. Current metrics are exposed at `/api/v1/ml-models/evo/metrics`.
 - Later iteration files (`v7.x`–`v10.x`) remain on disk for historical reference but are not registered as champions — the Models page and `ml_models` table were reset on 2026-04-14 to a single-source-of-truth: v6.9.

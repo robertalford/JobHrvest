@@ -1,0 +1,122 @@
+[
+  {
+    "domain": "boards.greenhouse.io",
+    "url": "https://fixtures.local/greenhouse",
+    "snapshot_path": "greenhouse.html",
+    "expected_titles": ["Senior Platform Engineer", "Data Analyst"],
+    "expected_job_count": 2,
+    "ats_platform": "greenhouse"
+  },
+  {
+    "domain": "td.wd3.myworkdayjobs.com",
+    "url": "https://fixtures.local/workday",
+    "snapshot_path": "workday.html",
+    "expected_titles": ["Product Manager", "Staff Engineer"],
+    "expected_job_count": 2,
+    "ats_platform": "workday"
+  },
+  {
+    "domain": "fa.example.oraclecloud.com",
+    "url": "https://fixtures.local/oracle-cx",
+    "snapshot_path": "oracle_cx.html",
+    "expected_titles": ["Finance Analyst", "HR Coordinator"],
+    "expected_job_count": 2,
+    "ats_platform": "oracle_cx"
+  },
+  {
+    "domain": "jobs.lever.co",
+    "url": "https://fixtures.local/lever",
+    "snapshot_path": "lever.html",
+    "expected_titles": ["Backend Engineer", "Customer Success Manager"],
+    "expected_job_count": 2,
+    "ats_platform": "lever"
+  },
+  {
+    "domain": "careers.smartrecruiters.com",
+    "url": "https://fixtures.local/smartrecruiters",
+    "snapshot_path": "smartrecruiters.html",
+    "expected_titles": ["UX Designer", "QA Engineer"],
+    "expected_job_count": 2,
+    "ats_platform": "smartrecruiters"
+  },
+  {
+    "domain": "jobs.jobvite.com",
+    "url": "https://fixtures.local/jobvite",
+    "snapshot_path": "jobvite.html",
+    "expected_titles": ["Sales Executive", "Revenue Operations Analyst"],
+    "expected_job_count": 2,
+    "ats_platform": "jobvite"
+  },
+  {
+    "domain": "applyflow.com",
+    "url": "https://fixtures.local/applyflow",
+    "snapshot_path": "applyflow.html",
+    "expected_titles": ["Implementation Specialist", "Solutions Consultant"],
+    "expected_job_count": 2,
+    "ats_platform": "applyflow"
+  },
+  {
+    "domain": "careers.acme.dev",
+    "url": "https://fixtures.local/nextjs-shell",
+    "snapshot_path": "nextjs_shell.html",
+    "expected_titles": ["Frontend Engineer", "Site Reliability Engineer"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "acme.com.au",
+    "url": "https://fixtures.local/elementor-grid",
+    "snapshot_path": "elementor_grid.html",
+    "expected_titles": ["Store Manager", "Regional Recruiter"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "jobs.acme.org",
+    "url": "https://fixtures.local/accordion-radix",
+    "snapshot_path": "accordion_radix.html",
+    "expected_titles": ["Policy Adviser", "Program Coordinator"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "docs.acme.edu.au",
+    "url": "https://fixtures.local/pdf-listing",
+    "snapshot_path": "pdf_listing.html",
+    "expected_titles": ["Teacher Aide", "Librarian"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "feeds.acme.net",
+    "url": "https://fixtures.local/rss-feed",
+    "snapshot_path": "rss.html",
+    "expected_titles": ["Community Manager", "Operations Lead"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "careers.acme.blog",
+    "url": "https://fixtures.local/wordpress",
+    "snapshot_path": "wordpress.html",
+    "expected_titles": ["Content Producer", "Marketing Manager"],
+    "expected_job_count": 2,
+    "ats_platform": "wordpress"
+  },
+  {
+    "domain": "jobs.acme.co.nz",
+    "url": "https://fixtures.local/bespoke",
+    "snapshot_path": "bespoke.html",
+    "expected_titles": ["Operations Coordinator", "Warehouse Supervisor"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  },
+  {
+    "domain": "empleo.acme.mx",
+    "url": "https://fixtures.local/multilingual",
+    "snapshot_path": "multilingual.html",
+    "expected_titles": ["Ingeniero de Datos", "Especialista de Soporte"],
+    "expected_job_count": 2,
+    "ats_platform": "other"
+  }
+]

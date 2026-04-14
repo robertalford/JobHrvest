@@ -2,6 +2,36 @@
 
 ---
 
+## 2026-04-15 (session 21 — Auto-Improve v2 foundation: v6.10 hotfix + signal-quality + evo scaffold)
+
+**Prompt:**
+> Please implement all suggested changes detailed below, in full. Pause the auto-improve service (and kill any live processes), so you can implement the changes. Fully deploy them (including in the container). Once done, restart the auto-improve service. Remember to update agent-instructions.md, memory.md, readme.md, change-history.md etc... and commit & push all changes (including any untracked from repo not related to your change).
+
+**What was done:**
+- Paused the host auto-improve daemon, then implemented the v2 redesign across the extractor loop, prompt pipeline, fixture gate, evolutionary-search scaffold, and persistence/docs.
+- **Shipment 0 hotfix:** added `backend/app/crawlers/tiered_extractor_v610.py` as a minimal `v6.9 + DetailEnricher` candidate with `EnrichmentBudget(max_pages=10, per_host_concurrency=2, total_deadline_s=20)` and paired it with `backend/app/crawlers/career_page_finder_v610.py`. Registered finder mapping support for file version `610` in both the API and task runtime.
+- **Signal-quality foundation:** extended `failure_analysis.py` with noise scoring, landmark excerpts, compact site diff-package generation, and structured rejection post-mortems; upgraded `memory_store.py` with richer rejection records, prompt rendering for recent rejections, and Ollama-backed play metadata extraction on promotions.
+- **Fail-fast guardrails:** added `backend/app/ml/champion_challenger/challenger_lint.py` and wired it into `auto_improve_daemon.py` for one auto-revise pass before hard failure. The linter blocks deep inheritance chains, unsafe `extract()` overrides, domain-literal hacks, oversized rewrites, and banned-approach retries.
+- **Fixture gate:** curated `backend/tests/fixtures/extractor_smoke/manifest.json` plus 15 smoke fixtures spanning ATS, app-shell, CMS, RSS/PDF, multilingual, and bespoke patterns. `fixture_harness.py` now supports this corpus directly and `verify_challenger.py` enforces `>=12/15` when the full pack is present.
+- **Prompt/layout changes:** `auto_improve.py` now emits representative per-site diff JSON files into `storage/auto_improve_context/v*/`, injects the latest structured rejection post-mortems near the prompt head, carries the previous fixture report, and accepts ancestor/parent context for the new diff-grounded mutation mode. `new-prompt.md` now documents the `_extract_raw` preference and strict SEARCH/REPLACE format.
+- **Evolutionary-search scaffold:** added `backend/app/ml/evo/{diff_format,bandit,population,archive,codex_runner,cycle}.py` and `backend/scripts/evo_cycle.py`, plus API metrics exposure at `GET /api/v1/ml-models/evo/metrics`. The daemon now shells out to `python -m scripts.evo_cycle` when `EVO_ENABLED=1`.
+- **Persistence:** added ORM models + Alembic migration `0029_evo_population.py` for `evo_individuals`, `evo_cycles`, and `evo_population_events`, updated `database/dump_models.sh`, and extended snapshot mirroring to include `database/play_library.json` alongside the existing memory/history mirrors.
+- **Operational wiring:** added manual `register_existing` trigger support to the daemon so prewritten challengers like v6.10 can be registered and A/B tested through the same daemon path as generated candidates.
+
+**Validation completed before deployment:**
+- `pytest backend/tests/unit/test_tiered_extractor_v610.py backend/tests/unit/test_challenger_lint.py backend/tests/unit/test_failure_analysis_v2.py backend/tests/unit/test_fixture_harness_v2.py backend/tests/unit/test_evo_diff_format.py backend/tests/unit/test_evo_strategy.py -q` → 14 passed.
+- Wider impacted subset (`test_detail_enricher`, `test_failure_analysis`, `test_tiered_extractor_v69`, `test_tiered_extractor_v610`, `test_challenger_lint`, `test_fixture_harness_v2`, `test_evo_diff_format`, `test_evo_strategy`) passed locally.
+- `python3 -m backend.scripts.verify_challenger --version v69 --json` → passes the new 15-fixture gate at `12/15`.
+- `python3 -m backend.scripts.verify_challenger --version v610 --champion v69 --json` → passes the same gate with neutral delta on the offline fixture corpus.
+- AST parse smoke-check across all newly touched Python modules passed.
+
+**Why:**
+- The post-reset loop had converged on a dead zone: 22 challengers, zero promotions, with field completeness stuck at 45.3 while the other three axes were already near ceiling. The highest-signal explanation was mechanical, not "Codex forgot how to extract": `DetailEnricher` existed but was never wired into the live v6.x chain. At the same time, Codex was being fed aggregate symptoms instead of concrete champion-vs-baseline field gaps, and search remained effectively sequential despite multiple candidate slots.
+
+**Notes:**
+- `tiered_extractor_v69.py` was intentionally left untouched as the immutable live champion.
+- Pre-existing unrelated worktree changes (for example `tiered_extractor_v70.py`, `database/jobharvest_latest.dump`) were preserved per project rule and will be included in the final commit as requested.
+
 ## 2026-04-15 (session 20 — Version-controlled champion/challenger models + history)
 
 **Prompt:**

@@ -18,11 +18,14 @@ Claude API — it keeps the loop offline-capable and free per iteration.
 
 from __future__ import annotations
 
+import difflib
+import html as html_lib
 import json
 import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -217,6 +220,41 @@ _AXES = ("field_completeness", "quality_extraction", "volume_accuracy", "discove
 # When grouping failures by ATS we key off `ats_platform` on the entry;
 # callers are expected to populate it via tiered_extractor.ats_fingerprinter.
 _UNKNOWN_ATS = "unknown"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _noise_score(text: str) -> float:
+    """Estimate description noise from whitespace/entity density."""
+    if not text:
+        return 0.0
+    raw = text or ""
+    entities = len(re.findall(r"&[a-zA-Z#0-9]+;", raw))
+    whitespace = sum(1 for ch in raw if ch in " \t\n\r")
+    newline_penalty = len(re.findall(r"\n{2,}", raw)) * 0.1
+    return round(min(1.0, ((entities + whitespace) / max(1, len(raw))) + newline_penalty), 4)
+
+
+def _landmark_excerpt(html: str, xpath: str, max_chars: int = 400) -> str:
+    if not html or not xpath:
+        return ""
+    try:
+        from lxml import html as lxml_html
+    except ImportError:
+        return ""
+    try:
+        root = lxml_html.fromstring(html)
+        matches = root.xpath(xpath)
+    except Exception:  # noqa: BLE001
+        return ""
+    for match in matches:
+        text = match.text_content() if hasattr(match, "text_content") else str(match)
+        cleaned = re.sub(r"\s+", " ", html_lib.unescape(text or "")).strip()
+        if cleaned:
+            return cleaned[:max_chars]
+    return ""
 
 
 def _axes_scorecard(analysis: dict) -> dict[str, float]:
@@ -523,3 +561,199 @@ def format_brief_for_prompt(brief: dict) -> str:
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def build_site_diff_package(entry: dict, html_file: str | None = None, detail_html_file: str | None = None) -> dict:
+    baseline_jobs = _coerce_jobs(entry.get("baseline_extracted_jobs"))
+    champion_jobs = _coerce_jobs(entry.get("model_extracted_jobs"))
+    wrapper = entry.get("baseline_full_wrapper") if isinstance(entry.get("baseline_full_wrapper"), dict) else {}
+    listing_html = _read_text_if_exists(html_file)
+    detail_html = _read_text_if_exists(detail_html_file)
+
+    champion_summary = _job_output_summary(champion_jobs, entry.get("model_tier") or "")
+    baseline_summary = _job_output_summary(baseline_jobs, "jobstream_wrapper")
+
+    diff = {
+        "missing_jobs": _titles_minus(baseline_jobs, champion_jobs),
+        "extra_jobs": _titles_minus(champion_jobs, baseline_jobs),
+        "field_gap_per_job": _field_gap_per_job(baseline_jobs, champion_jobs),
+        "description_noise_delta": round(
+            champion_summary["desc_noise_score"] - baseline_summary["desc_noise_score"],
+            4,
+        ),
+        "volume_ratio": round(len(champion_jobs) / max(1, len(baseline_jobs)), 4),
+    }
+    return {
+        "url": entry.get("test_url") or entry.get("model_url_found") or "",
+        "ats": _derive_ats(entry),
+        "champion_output": champion_summary,
+        "baseline_output": baseline_summary,
+        "diff": diff,
+        "html_landmark_excerpts": {
+            "listing_page_tier_hint": _landmark_excerpt(listing_html, wrapper.get("boundary") or "//main"),
+            "detail_page_tier_hint": _landmark_excerpt(detail_html, (wrapper.get("details_page_description_paths") or ["//article"])[0] if wrapper.get("details_page_description_paths") else "//article"),
+            "baseline_wrapper_boundary": _landmark_excerpt(listing_html, wrapper.get("boundary") or "//main"),
+            "baseline_wrapper_title": _landmark_excerpt(listing_html, wrapper.get("title") or "//title") or _landmark_excerpt(listing_html, "//main"),
+            "baseline_wrapper_detail_desc_paths": [
+                _landmark_excerpt(detail_html, xpath)
+                for xpath in (wrapper.get("details_page_description_paths") or [])[:3]
+                if xpath
+            ],
+        },
+    }
+
+
+def write_postmortem(prev_version: str, outcome: dict) -> Optional[dict]:
+    parent_version = outcome.get("parent_version") or _previous_version(prev_version)
+    if not parent_version:
+        return None
+    child_file = _version_file(prev_version)
+    parent_file = _version_file(parent_version)
+    if not child_file.exists() or not parent_file.exists():
+        return None
+
+    diff_text = "".join(
+        difflib.unified_diff(
+            parent_file.read_text().splitlines(True),
+            child_file.read_text().splitlines(True),
+            fromfile=parent_file.name,
+            tofile=child_file.name,
+            n=3,
+        )
+    )[:6000]
+    analysis = _ollama_postmortem(diff_text, outcome)
+    if not analysis:
+        return None
+    likely = (analysis.get("likely_cause") or "").strip()
+    if not _references_exist_in_diff(diff_text, likely):
+        logger.warning("postmortem dropped for %s: likely_cause did not match diff", prev_version)
+        return None
+
+    from app.ml.champion_challenger import memory_store
+
+    return memory_store.append_rejection(
+        prev_version,
+        gate_failures=outcome.get("gate_failures") or [],
+        axes_delta=outcome.get("axes_delta") or {},
+        symptom=(analysis.get("symptom") or "")[:240],
+        likely_cause=likely[:240],
+        rule_for_future=(analysis.get("rule_for_future") or "")[:240],
+        fixture_score=outcome.get("fixture_score"),
+        composite=outcome.get("composite"),
+        path=outcome.get("memory_path"),
+    )
+
+
+def _coerce_jobs(jobs: object) -> list[dict]:
+    return [job for job in (jobs or []) if isinstance(job, dict)]
+
+
+def _job_output_summary(jobs: list[dict], tier_used: str) -> dict:
+    descriptions = [(job.get("description") or "") for job in jobs]
+    desc_sample = next((desc for desc in descriptions if desc.strip()), "")
+    fields_present = {
+        field: sum(1 for job in jobs if (job.get(field) or "").strip())
+        for field in ("title", "source_url", "location_raw", "salary_raw", "employment_type", "description")
+    }
+    avg_desc_len = round(sum(len(desc.strip()) for desc in descriptions) / max(1, len(descriptions)), 1) if jobs else 0
+    return {
+        "tier_used": tier_used,
+        "titles": [job.get("title") or "" for job in jobs[:6]],
+        "jobs_count": len(jobs),
+        "fields_present_per_job": fields_present,
+        "avg_desc_len": avg_desc_len,
+        "desc_noise_score": _noise_score(desc_sample),
+        "sample_description_chunk": (desc_sample or "")[:180],
+    }
+
+
+def _titles_minus(left: list[dict], right: list[dict]) -> list[str]:
+    right_titles = {(job.get("title") or "").strip().lower() for job in right}
+    missing = []
+    for job in left:
+        title = (job.get("title") or "").strip()
+        if title and title.lower() not in right_titles:
+            missing.append(title)
+    return missing[:6]
+
+
+def _field_gap_per_job(baseline_jobs: list[dict], champion_jobs: list[dict]) -> dict[str, int]:
+    gaps: dict[str, int] = {}
+    for field in ("title", "source_url", "location_raw", "salary_raw", "employment_type", "description"):
+        baseline_present = sum(1 for job in baseline_jobs if (job.get(field) or "").strip())
+        champion_present = sum(1 for job in champion_jobs if (job.get(field) or "").strip())
+        gaps[field] = max(0, baseline_present - champion_present)
+    return gaps
+
+
+def _read_text_if_exists(path: str | None) -> str:
+    if not path:
+        return ""
+    p = Path(path)
+    if not p.exists():
+        return ""
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def _version_file(version: str) -> Path:
+    num = re.sub(r"[^\d]", "", version)
+    return _repo_root() / "backend" / "app" / "crawlers" / f"tiered_extractor_v{num}.py"
+
+
+def _previous_version(version: str) -> str | None:
+    digits = re.sub(r"[^\d]", "", version)
+    if not digits:
+        return None
+    numeric = int(digits)
+    if numeric <= 16:
+        return None
+    return f"v{numeric - 1}"
+
+
+def _ollama_postmortem(diff_text: str, outcome: dict) -> Optional[dict]:
+    prompt = (
+        "Return strict JSON with keys symptom, likely_cause, rule_for_future.\n"
+        f"Outcome: {json.dumps(outcome, default=str)[:1000]}\n"
+        f"Diff:\n{diff_text[:6000]}"
+    )
+    try:
+        from app.core.config import settings
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "format": "json",
+                    "stream": False,
+                    "options": {"temperature": 0.2, "num_predict": 400},
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("postmortem ollama call failed: %s", exc)
+        return None
+    parsed = _safe_parse_json(payload.get("response", ""))
+    if not parsed:
+        return None
+    return {
+        "symptom": parsed.get("symptom") or "",
+        "likely_cause": parsed.get("likely_cause") or "",
+        "rule_for_future": parsed.get("rule_for_future") or "",
+    }
+
+
+def _references_exist_in_diff(diff_text: str, likely_cause: str) -> bool:
+    if not likely_cause:
+        return False
+    line_match = re.search(r"line\s+(\d+)", likely_cause, re.IGNORECASE)
+    if line_match:
+        return f"@@ -{line_match.group(1)}" in diff_text or f"+{line_match.group(1)}" in diff_text
+    fn_matches = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", likely_cause)
+    if fn_matches:
+        return any(name in diff_text for name in fn_matches)
+    return any(token in diff_text for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", likely_cause)[:3])

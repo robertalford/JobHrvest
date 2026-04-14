@@ -1,0 +1,107 @@
+[
+  {
+    "version": "v6.1",
+    "summary": "--- tiered_extractor_v60.py\n+++ tiered_extractor_v61.py\n@@ -1,246 +1,128 @@\n \"\"\"\n-Tiered Extraction Engine v6.0 \u2014 Consolidated \"clean slate\" extractor.\n-\n-Built from v2.6 (82% accuracy, the all-time b",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:39:08.909388+00:00",
+    "notes": "v6.0 -> v6.1"
+  },
+  {
+    "version": "v6.2",
+    "summary": "--- tiered_extractor_v61.py\n+++ tiered_extractor_v62.py\n@@ -1,32 +1,31 @@\n \"\"\"\n-Tiered Extraction Engine v6.1 \u2014 Targeted improvements over v6.0.\n-\n-Changes from v6.0:\n-  1. Title validation hardening:",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:39:38.947635+00:00",
+    "notes": "v6.1 -> v6.2"
+  },
+  {
+    "version": "v6.4",
+    "summary": "--- tiered_extractor_v62.py\n+++ tiered_extractor_v64.py\n@@ -1,12 +1,21 @@\n \"\"\"\n-Tiered Extraction Engine v6.2 \u2014 Targeted improvements over v6.1.\n-\n-Changes from v6.1:\n-  1. Forced Playwright rendering",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:40:08.987346+00:00",
+    "notes": "v6.2 -> v6.4"
+  },
+  {
+    "version": "v6.5",
+    "summary": "--- tiered_extractor_v64.py\n+++ tiered_extractor_v65.py\n@@ -1,21 +1,20 @@\n \"\"\"\n-Tiered Extraction Engine v6.4 \u2014 Fast hint-aware extraction with bounded enrichment.\n-\n-Inherits from v6.2, NOT v6.3 (ski",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:40:39.022156+00:00",
+    "notes": "v6.4 -> v6.5"
+  },
+  {
+    "version": "v6.7",
+    "summary": "--- tiered_extractor_v65.py\n+++ tiered_extractor_v67.py\n@@ -1,294 +1,673 @@\n \"\"\"\n-Tiered Extraction Engine v6.5 \u2014 Improved title validation, title normalization,\n-and Manatal (careers-page.com) ATS ex",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:41:09.061341+00:00",
+    "notes": "v6.5 -> v6.7"
+  },
+  {
+    "version": "v6.8",
+    "summary": "--- tiered_extractor_v67.py\n+++ tiered_extractor_v68.py\n@@ -1,382 +1,147 @@\n \"\"\"\n-Tiered Extraction Engine v6.7 \u2014 resilient card extraction and pagination recovery.\n-\n-Builds on v6.6 with two broad im",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:41:39.088521+00:00",
+    "notes": "v6.7 -> v6.8"
+  },
+  {
+    "version": "v6.9",
+    "summary": "--- tiered_extractor_v68.py\n+++ tiered_extractor_v69.py\n@@ -1,402 +1,80 @@\n \"\"\"\n-Tiered Extraction Engine v6.8 \u2014 ATS-first precision fixes for Jobvite and Jobs2Web.\n+Tiered Extraction Engine v6.9 \u2014 Jo",
+    "axis_deltas": {
+      "discovery": 0.0,
+      "quality_extraction": 0.0,
+      "volume_accuracy": 0.0,
+      "field_completeness": 0.0
+    },
+    "composite_delta": 1.0,
+    "ats_clusters_fixed": [],
+    "diff_keywords": [],
+    "recorded_at": "2026-04-14T15:42:09.125836+00:00",
+    "notes": "v6.8 -> v6.9"
+  }
+]

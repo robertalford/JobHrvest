@@ -72,9 +72,11 @@ def _select_fixture_set(limit: Optional[int]):
 async def _run_one(version_tag: str, harness) -> tuple[dict, float]:
     extractor = _load_extractor_instance(version_tag)
     report = await harness.run(extractor)
+    passed_count = sum(1 for item in report.results if item.quality_passed and item.error is None)
     return {
         "version": version_tag,
         "fixtures": report.fixtures_total,
+        "fixtures_passed": passed_count,
         "elapsed_s": round(report.elapsed_s, 2),
         "composite": report.composite,
         "axes": report.axes,
@@ -96,6 +98,7 @@ async def main() -> int:
     parser.add_argument("--version", help="Challenger version tag, e.g. v92")
     parser.add_argument("--champion", help="Champion version tag for comparison, e.g. v91")
     parser.add_argument("--challenger", help="Alias for --version when --champion is also given")
+    parser.add_argument("--candidate-id", help="Optional evo candidate id for logging/reporting")
     parser.add_argument("--tolerance", type=float, default=2.0,
                         help="Composite points below champion before we fail (default 2.0)")
     parser.add_argument("--limit", type=int, help="Limit fixtures to first N (for dry runs)")
@@ -138,6 +141,7 @@ async def main() -> int:
     elapsed = round(time.monotonic() - t_start, 2)
     payload = {
         "elapsed_s": elapsed,
+        "candidate_id": args.candidate_id,
         "tolerance": args.tolerance,
         "champion": champion_report,
         "challenger": challenger_report,
@@ -151,8 +155,12 @@ async def main() -> int:
         print(json.dumps(payload, indent=2, default=str))
     else:
         logger.info(
-            "challenger %s composite=%.2f (%.2fs, %d fixtures)",
-            challenger_tag, challenger_score, elapsed, len(harness.fixtures),
+            "challenger %s composite=%.2f (%.2fs, %d fixtures, %d passed)",
+            challenger_tag,
+            challenger_score,
+            elapsed,
+            len(harness.fixtures),
+            challenger_report["fixtures_passed"],
         )
         if champion_score is not None:
             delta = challenger_score - champion_score
@@ -162,6 +170,9 @@ async def main() -> int:
             )
 
     # Pass/fail verdict
+    if challenger_report["fixtures"] >= 15 and challenger_report["fixtures_passed"] < 12:
+        logger.error("FAIL: challenger passed %d/%d fixtures (<12/15 threshold)", challenger_report["fixtures_passed"], challenger_report["fixtures"])
+        return 1
     if champion_score is not None and challenger_score + args.tolerance < champion_score:
         logger.error("FAIL: challenger regressed beyond tolerance — aborting cycle")
         return 1

@@ -62,6 +62,20 @@ def _resolve_default_dir() -> Path:
 _DEFAULT_DIR = _resolve_default_dir()
 
 
+def _resolve_default_snapshot() -> Path:
+    explicit = os.environ.get("PLAY_LIBRARY_SNAPSHOT")
+    if explicit:
+        return Path(explicit)
+    here = os.path.abspath(__file__)
+    repo_root = here
+    for _ in range(5):
+        repo_root = os.path.dirname(repo_root)
+    return Path(os.path.join(repo_root, "database", "play_library.json"))
+
+
+_DEFAULT_SNAPSHOT = _resolve_default_snapshot()
+
+
 @dataclass
 class Play:
     version: str
@@ -102,6 +116,27 @@ class PlayLibrary:
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning("play_library: skipping malformed %s: %s", file.name, e)
         return plays
+
+    def write_snapshot(self, destination: Path | str = _DEFAULT_SNAPSHOT) -> Path:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        plays = [p.to_dict() for p in self.load_all()]
+        target.write_text(json.dumps(plays, indent=2, default=str))
+        return target
+
+    def restore_snapshot(self, snapshot: Path | str = _DEFAULT_SNAPSHOT) -> int:
+        source = Path(snapshot)
+        if not source.exists():
+            return 0
+        raw = json.loads(source.read_text())
+        restored = 0
+        self.root.mkdir(parents=True, exist_ok=True)
+        for existing in self.root.glob("*.json"):
+            existing.unlink()
+        for item in raw:
+            self.record(Play(**item))
+            restored += 1
+        return restored
 
     # ------------------------------------------------------------------
     # Retrieve — TF-IDF cosine similarity against `summary` + keywords

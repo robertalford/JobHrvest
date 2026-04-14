@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Double, ForeignKey, Integer, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Double, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -225,3 +225,46 @@ class InferenceMetricsHourly(Base):
     latency_p99_ms: Mapped[Optional[float]] = mapped_column(Double)
     llm_escalation_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class EvoIndividual(Base):
+    __tablename__ = "evo_individuals"
+
+    version_tag: Mapped[str] = mapped_column(Text, primary_key=True)
+    ml_model_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ml_models.id", ondelete="SET NULL")
+    )
+    parent_tag: Mapped[Optional[str]] = mapped_column(Text)
+    island_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    focus_axis: Mapped[str] = mapped_column(Text, nullable=False)
+    behaviour_cell: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    fixture_composite: Mapped[Optional[float]] = mapped_column(Double)
+    ab_composite: Mapped[Optional[float]] = mapped_column(Double)
+    axes_json: Mapped[Optional[dict]] = mapped_column(JSONB)
+    loc: Mapped[Optional[int]] = mapped_column(Integer)
+    file_path: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class EvoCycle(Base):
+    __tablename__ = "evo_cycles"
+
+    id: Mapped[uuid.UUID] = mapped_column("cycle_id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    n_candidates: Mapped[Optional[int]] = mapped_column(Integer)
+    promoted_tag: Mapped[Optional[str]] = mapped_column(Text)
+    notes: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+
+class EvoPopulationEvent(Base):
+    __tablename__ = "evo_population_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cycle_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("evo_cycles.cycle_id", ondelete="CASCADE"))
+    version_tag: Mapped[Optional[str]] = mapped_column(Text)
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[Optional[dict]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -10,6 +10,7 @@ Run: nohup python3 -B -u backend/scripts/auto_improve_daemon.py &
 Health check: curl http://localhost:8001/api/v1/ml-models/auto-improve/health
 """
 
+import fcntl
 import json
 import os
 import re
@@ -36,9 +37,11 @@ HEARTBEAT_INTERVAL = 60  # independent of main loop — proves daemon is alive
 AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "3"))
 STATUS_FILE = os.path.join(ROOT_DIR, "storage", "auto_improve_status.json")
 LOG_DIR = os.path.join(ROOT_DIR, "storage", "auto_improve_logs")
+LOCK_FILE = os.path.join(ROOT_DIR, "storage", "auto_improve_daemon.lock")
 
 _last_activity_msg = "starting"
 _last_activity_ts = datetime.now()
+_lock_fd: int | None = None
 
 
 def log(msg: str):
@@ -73,9 +76,59 @@ def _heartbeat_loop():
         time.sleep(HEARTBEAT_INTERVAL)
 
 
+def _acquire_singleton_lock() -> None:
+    """Ensure only one daemon runs at a time. Exit immediately if another is live.
+
+    Prior incident: two daemons started concurrently, both polled the trigger dir,
+    both spawned Codex iterations for the same champion, and both fired test runs —
+    producing duplicate improvement-run rows and duplicate A/B tests on the Models
+    page. flock+LOCK_NB makes that impossible: the second process can't acquire
+    the lock and exits cleanly before doing any work.
+    """
+    global _lock_fd
+    os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            with open(LOCK_FILE, "r") as f:
+                holder = f.read().strip()
+        except Exception:
+            holder = "unknown"
+        os.close(fd)
+        print(
+            f"❌ auto_improve_daemon already running (lock held by pid {holder}). "
+            f"Exiting — kill the other process first.",
+            flush=True,
+        )
+        sys.exit(1)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    _lock_fd = fd
+
+
+def _release_singleton_lock() -> None:
+    """Release the flock and close the fd — called before execv so the re-execed
+    process can re-acquire cleanly."""
+    global _lock_fd
+    if _lock_fd is None:
+        return
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(_lock_fd)
+    except Exception:
+        pass
+    _lock_fd = None
+
+
 def _self_exec():
     """Re-exec the daemon — supervisor-less recovery from fatal errors."""
     log("♻️ self-exec — restarting daemon process")
+    _release_singleton_lock()
     try:
         os.execv(sys.executable, [sys.executable, "-B", "-u", os.path.abspath(__file__)])
     except Exception as e:
@@ -131,7 +184,7 @@ def find_model_needing_improvement(token: str) -> dict | None:
         model_ver = _extract_version(model["name"])
         if model_ver is None:
             continue
-        next_file_ver = model_ver + 1
+        next_file_ver = 610 if model["name"] == "v6.9" else model_ver + 1
         next_file = os.path.join(PROJECT_DIR, "app", "crawlers", f"tiered_extractor_v{next_file_ver}.py")
         skip_file = next_file + ".skip"
         if os.path.exists(next_file) or os.path.exists(skip_file):
@@ -340,11 +393,21 @@ def _current_champion_tag(token: str) -> str | None:
 
 
 def _extract_version(name: str) -> int | None:
-    """Extract file version number from model name. 'v1.9' → 19, 'v2.0' → 20."""
+    """Extract file version number from model name. 'v6.10' → 610."""
     match = re.search(r"v(\d+)\.(\d+)", name)
     if match:
-        return int(match.group(1)) * 10 + int(match.group(2))
+        return int(f"{match.group(1)}{match.group(2)}")
     return None
+
+
+def _format_version(file_ver: int) -> str:
+    if 600 <= file_ver < 700:
+        return f"v6.{file_ver - 600}"
+    if 100 <= file_ver < 200:
+        return f"v10.{file_ver - 100}"
+    if file_ver >= 10:
+        return f"v{file_ver // 10}.{file_ver % 10}"
+    return f"v0.{file_ver}"
 
 
 def _create_improvement_run(token: str, data: dict) -> dict | None:
@@ -476,8 +539,8 @@ def run_improvement(model: dict, token: str):
     model_name = model["name"]
     model_id = model["id"]
     model_ver = _extract_version(model_name)
-    next_file_ver = model_ver + 1
-    next_version = f"v{next_file_ver // 10}.{next_file_ver % 10}"
+    next_file_ver = 610 if model_name == "v6.9" else model_ver + 1
+    next_version = _format_version(next_file_ver)
 
     log(f"🔄 Starting improvement: {model_name} → {next_version}")
 
@@ -661,6 +724,48 @@ def run_improvement(model: dict, token: str):
             })
         return
 
+    # AST linter before we spend deploy/A/B budget. One auto-revise pass only.
+    try:
+        sys.path.insert(0, PROJECT_DIR)
+        from app.ml.champion_challenger.challenger_lint import lint_challenger  # type: ignore
+        from app.ml.champion_challenger import memory_store  # type: ignore
+
+        lint_report = lint_challenger(extractor_file, memory_store.load())
+        if not lint_report.ok:
+            violations_text = "\n".join(
+                f"- {v.rule_id} line {v.line or '?'}: {v.message}"
+                for v in lint_report.violations
+            )
+            log(f"⚠️ Challenger lint failed for {next_version}; requesting one revise pass")
+            revise_prompt = (
+                f"Revise only {extractor_file}.\n"
+                f"Fix these lint violations without broadening scope:\n{violations_text}\n"
+                "Keep the file importable and preserve the current intent."
+            )
+            ai.run_codex(revise_prompt, ROOT_DIR, f"{model_id}_lintfix")
+            lint_report = lint_challenger(extractor_file, memory_store.load())
+        if not lint_report.ok:
+            reason = "; ".join(f"{v.rule_id}: {v.message}" for v in lint_report.violations[:3])
+            log(f"❌ Challenger lint still failing after revise pass: {reason}")
+            try:
+                memory_store.append_rejection(
+                    next_version,
+                    gate_failures=["lint"],
+                    symptom="challenger lint violations",
+                    likely_cause=reason,
+                    rule_for_future="inherit from the stable base and keep the change narrower",
+                )
+            except Exception as e:
+                log(f"⚠️ could not record lint rejection in memory: {e}")
+            if imp_run_id:
+                _update_improvement_run(token, imp_run_id, {
+                    "status": "failed",
+                    "error_message": f"Challenger lint failed: {reason}",
+                })
+            return
+    except Exception as e:
+        log(f"⚠️ challenger lint unavailable/non-fatal: {e}")
+
     log(f"✅ Extractor file present (soft_success={soft_success}). Deploying...")
 
     # Update status to deploying
@@ -704,6 +809,7 @@ def run_improvement(model: dict, token: str):
             "docker", "exec", "jobharvest-api", "python3", "-m",
             "scripts.verify_challenger",
             "--version", next_version.replace(".", ""),
+            "--candidate-id", next_version.replace(".", ""),
             "--tolerance", os.environ.get("FIXTURE_TOLERANCE", "2.0"),
         ]
         if champion_tag:
@@ -790,6 +896,90 @@ def run_improvement(model: dict, token: str):
         log(f"⚠️ commit_model_snapshot failed (non-fatal): {e}")
 
 
+def _register_existing_challenger(model: dict, token: str, *, next_version: str, file_ver: int) -> None:
+    extractor_file = os.path.join(PROJECT_DIR, "app", "crawlers", f"tiered_extractor_v{file_ver}.py")
+    if not os.path.exists(extractor_file):
+        raise FileNotFoundError(extractor_file)
+
+    subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.server.yml", "up", "-d", "--build", "api"],
+        cwd=ROOT_DIR, capture_output=True, timeout=120,
+    )
+    subprocess.run(["docker", "restart", "jobharvest-api"], capture_output=True, timeout=30)
+    time.sleep(10)
+
+    verify = subprocess.run(
+        ["docker", "exec", "jobharvest-api", "python3", "-c",
+         f"from app.crawlers.tiered_extractor_v{file_ver} import TieredExtractorV{file_ver}; print('OK')"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if "OK" not in (verify.stdout or ""):
+        raise RuntimeError(f"Import failed for {next_version}: {verify.stderr[:200]}")
+
+    champion_tag = _current_champion_tag(token)
+    cmd = [
+        "docker", "exec", "jobharvest-api", "python3", "-m",
+        "scripts.verify_challenger",
+        "--version", next_version.replace(".", ""),
+        "--candidate-id", next_version.replace(".", ""),
+        "--tolerance", os.environ.get("FIXTURE_TOLERANCE", "2.0"),
+    ]
+    if champion_tag:
+        cmd.extend(["--champion", champion_tag])
+    fixture_res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if fixture_res.returncode == 1:
+        raise RuntimeError(f"Fixture smoke failed for {next_version}")
+
+    api_post("/ml-models/", token, {
+        "name": next_version,
+        "model_type": "tiered_extractor",
+        "description": f"{next_version}: registered existing challenger file.",
+    })
+    models = get_models(token)
+    new_model = next((m for m in models if m["name"] == next_version), None)
+    if not new_model:
+        raise RuntimeError(f"Could not locate model {next_version} after creation")
+    api_post(f"/ml-models/{new_model['id']}/test-runs/execute", token, {
+        "sample_size": 179,
+        "auto_improve": True,
+        "use_fixed_set": True,
+        "include_exploration": True,
+    })
+    log(f"✅ Existing challenger {next_version} registered and 179-site A/B triggered")
+
+
+def _process_manual_triggers(token: str) -> bool:
+    trigger_dir = os.path.join(ROOT_DIR, "storage", "auto_improve_triggers")
+    if not os.path.isdir(trigger_dir):
+        return False
+    triggers = sorted(f for f in os.listdir(trigger_dir) if f.endswith(".trigger"))
+    handled = False
+    for fname in triggers:
+        path = os.path.join(trigger_dir, fname)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if data.get("mode") != "register_existing":
+                continue
+            model_id = data.get("model_id")
+            next_version = data.get("next_version")
+            file_ver = int(data.get("file_version"))
+            if not model_id or not next_version:
+                os.remove(path)
+                continue
+            model = api_get(f"/ml-models/{model_id}", token)
+            _register_existing_challenger(model, token, next_version=next_version, file_ver=file_ver)
+            os.remove(path)
+            handled = True
+        except Exception as e:
+            log(f"manual trigger {fname} failed: {e}")
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    return handled
+
+
 def _already_snapshotted(test_run_id: str) -> bool:
     """Idempotency: skip commit if the last 20 commits already mention this test_run_id."""
     if not test_run_id:
@@ -849,9 +1039,9 @@ def commit_model_snapshot(model: dict, next_version: str | None = None,
         log(f"  snapshot: dump error — {e}")
         return
 
-    # 2) Mirror Codex-facing memory files into the git-tracked `database/` path.
-    #    The live copies in `storage/` stay put so `memory_store.py` resolution
-    #    is untouched — these are read-only mirrors for clone restore.
+    # 2) Mirror Codex-facing state into the git-tracked `database/` path.
+    #    The live copies in `storage/` stay put so runtime resolution is
+    #    untouched — these are read-only mirrors for clone restore.
     for src_name in ("auto_improve_memory.json", "auto_improve_history.json"):
         src = os.path.join(ROOT_DIR, "storage", src_name)
         dst = os.path.join(ROOT_DIR, "database", src_name)
@@ -861,6 +1051,24 @@ def commit_model_snapshot(model: dict, next_version: str | None = None,
                 shutil.copy2(src, dst)
         except Exception as e:
             log(f"  snapshot: mirror {src_name} failed — {e}")
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from app.ml.champion_challenger.play_library import default_library; "
+                    "print(default_library.write_snapshot())"
+                ),
+            ],
+            cwd=PROJECT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as e:
+        log(f"  snapshot: mirror play_library failed — {e}")
 
     # 3) Stage + commit
     try:
@@ -869,6 +1077,7 @@ def commit_model_snapshot(model: dict, next_version: str | None = None,
              "database/models_snapshot.sql",
              "database/auto_improve_memory.json",
              "database/auto_improve_history.json",
+             "database/play_library.json",
              "backend/app/crawlers/"],
             capture_output=True, text=True, timeout=30, check=False,
         )
@@ -906,8 +1115,9 @@ def commit_model_snapshot(model: dict, next_version: str | None = None,
             f"\n"
             f"Snapshot scope: ml_models, model_versions, experiments,\n"
             f"codex_improvement_runs, metric_snapshots, gold_holdout_*,\n"
-            f"ats_pattern_proposals, drift_baselines. Memory mirrors:\n"
-            f"database/auto_improve_memory.json, database/auto_improve_history.json.\n"
+            f"ats_pattern_proposals, drift_baselines. Mirrors:\n"
+            f"database/auto_improve_memory.json, database/auto_improve_history.json,\n"
+            f"database/play_library.json.\n"
             f"\n"
             f"Co-Authored-By: Codex Auto-Improve <auto-improve@jobharvest.local>"
         )
@@ -979,6 +1189,7 @@ def _install_signal_handlers():
     def _graceful(sig, frame):
         log(f"received signal {sig} — shutting down")
         _write_status("shutdown")
+        _release_singleton_lock()
         sys.exit(0)
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
@@ -1015,6 +1226,7 @@ def _cleanup_stale_running_rows() -> None:
 
 
 def main():
+    _acquire_singleton_lock()
     _install_signal_handlers()
     threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
 
@@ -1043,6 +1255,13 @@ def main():
             except Exception as e:
                 log(f"snapshot-trigger pass failed (non-fatal): {e}")
 
+            try:
+                if _process_manual_triggers(token):
+                    time.sleep(POLL_INTERVAL)
+                    continue
+            except Exception as e:
+                log(f"manual-trigger pass failed (non-fatal): {e}")
+
             if is_test_running(token):
                 _write_status("Waiting for test to complete...")
                 time.sleep(POLL_INTERVAL)
@@ -1055,7 +1274,18 @@ def main():
                 continue
 
             try:
-                run_improvement(model, token)
+                if os.environ.get("EVO_ENABLED", "0") == "1":
+                    log(f"🧬 Running evo cycle for {model['name']}")
+                    subprocess.run(
+                        ["python3", "-m", "scripts.evo_cycle", "--model-id", model["id"]],
+                        cwd=PROJECT_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=int(os.environ.get("EVO_TIMEOUT_SEC", "1800")),
+                        check=False,
+                    )
+                else:
+                    run_improvement(model, token)
                 consecutive_errors = 0
             except Exception as e:
                 log(f"❌ Improvement failed: {e}")

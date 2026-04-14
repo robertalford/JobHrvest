@@ -44,6 +44,7 @@ Then inherit from the stable base — never the current champion:
 - **Extractor:** `TieredExtractorV16` (stable base, do not modify).
 - **Finder:** `CareerPageFinderV26` (stable discovery, do not modify).
 - Write your challenger as `backend/app/crawlers/tiered_extractor_vNN.py` (and paired finder). Max 1 level of inheritance — stable base → your challenger.
+- Prefer overriding narrower extractor helpers such as `_extract_raw`-style methods instead of replacing `extract()` wholesale. If you do override `extract()`, preserve the parent flow or explicitly finalize with enrichment.
 
 Old iteration files from before the 2026-04-14 reset are archived under `backend/app/crawlers/_archive/`. Do not reference them.
 
@@ -146,6 +147,20 @@ Kill the ideas that don't survive. Merge overlaps.
 - Keep extraction priority: parent v1.6 → structured data → ATS extractors → DOM fallbacks.
 - Finder changes only if discovery is the weakest axis or hitting wrong pages.
 - Update `storage/auto_improve_memory.json` via `memory_store.append_promotion` / `append_rejection` only if you understand the schema — otherwise leave it.
+
+### SEARCH/REPLACE mutation format
+
+When the caller puts you in diff-grounded mutation mode, return only blocks in this form:
+
+```text
+<<<<<<< SEARCH
+<exact lines from parent, whitespace-significant, matches once>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+```
+
+Do not fuzz the SEARCH anchor. If the parent source changed and the anchor no longer matches exactly, inspect the updated parent and emit a corrected block.
 
 ### 6. Validate with pytest BEFORE declaring done
 
