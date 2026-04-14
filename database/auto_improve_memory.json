@@ -62,7 +62,8 @@
     "Open-state accordion extraction (`data-state=\"open\"` + heading + detail link + labeled location) recovers modern CMS/Radix career modules with low Type-1 risk.",
     "Jobs2Web shell probing that includes parsed `ssoUrl` host variants and bounded `/services/search/*` fallbacks improves recovery when standard API/referrer endpoints are sparse.",
     "Preserving trusted same-page anchor vacancies (Elementor/open-state) through post-filtering/dedupe keeps valid employment-page jobs that would otherwise be dropped by broad non-...",
-    "Dedicated careers-page `.job-card` extraction with bounded `?page=` follow-up recovers high-volume ATS boards more reliably than generic linked-card fallback."
+    "Dedicated careers-page `.job-card` extraction with bounded `?page=` follow-up recovers high-volume ATS boards more reliably than generic linked-card fallback.",
+    "Coverage-gap fallback merging (primary under-captures, fallback has richer same-page rows with location/type metadata) can recover real volume without loosening global title validation."
   ],
   "what_doesnt_work": [
     "Leaving listing pagination anchors (`/show_more`, `Show N more`) in final jobsets leaks obvious non-job titles and degrades precision.",
@@ -105,7 +106,8 @@
     "Using fixed top-N Martian probes from a single sorted list can exhaust request budget on one host family and miss live APIs on alternate ATS hosts.",
     "Scanning only the first one or two script chunks for endpoint hints under-captures app-shell boards where APIs are declared in page-specific bundles.",
     "Accepting small 1-2 item sets without explicit role and job-evidence checks allows culture/leadership cards to pass as jobs.",
-    "Treating listing CTA labels (e.g. Job Openings / Join Our Team) as reject-only text in subpage traversal blocks true listing endpoints."
+    "Treating listing CTA labels (e.g. Job Openings / Join Our Team) as reject-only text in subpage traversal blocks true listing endpoints.",
+    "Keeping Vue/handlebars placeholder titles (`{{entry.name}}`) and contact/CTA strings in final output pollutes jobsets and masks true volume gaps with fake count parity."
   ],
   "banned_approaches": [],
   "recent_promotions": [],
