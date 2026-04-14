@@ -506,16 +506,48 @@ def run_improvement(model: dict, token: str):
     ai = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ai)
 
-    # Get test run
-    runs = api_get(f"/ml-models/{model_id}/test-runs?page=1&page_size=1", token)
-    if not runs["items"]:
-        log("❌ No test run found")
+    # Get test run.
+    #
+    # ROLLBACK CASE: when find_model_needing_improvement returned a rollback
+    # target (best_model with latest_completed's test data grafted on), we
+    # MUST use the grafted run, not re-fetch from the API by model_id —
+    # that would silently swap in best_model's stale historical test and
+    # discard the recent regression we're actually trying to fix.
+    rollback_from = model.get("_rollback_from")
+    grafted = model.get("latest_test_run")
+    if rollback_from and grafted and grafted.get("id"):
+        # Re-fetch the grafted run by id so we get the full results_detail
+        # payload (the model object only carries a summary).
+        try:
+            run = api_get(
+                f"/ml-models/{grafted.get('model_id', model_id)}"
+                f"/test-runs/{grafted['id']}",
+                token,
+            )
+            log(f"📌 Using grafted test run from {rollback_from} "
+                f"(rollback to {model['name']} as inheritance base)")
+        except Exception as e:  # noqa: BLE001
+            log(f"⚠️ grafted-run fetch failed: {e} — falling back to {model['name']}'s latest")
+            run = None
+        if not run:
+            runs = api_get(f"/ml-models/{model_id}/test-runs?page=1&page_size=1", token)
+            run = runs["items"][0] if runs.get("items") else None
+    else:
+        runs = api_get(f"/ml-models/{model_id}/test-runs?page=1&page_size=1", token)
+        if not runs.get("items"):
+            log("❌ No test run found")
+            if imp_run_id:
+                _update_improvement_run(token, imp_run_id, {
+                    "status": "failed", "error_message": "No test run found"})
+            return
+        run = runs["items"][0]
+
+    if not run:
+        log("❌ No test run available for analysis")
         if imp_run_id:
             _update_improvement_run(token, imp_run_id, {
-                "status": "failed", "error_message": "No test run found"})
+                "status": "failed", "error_message": "No test run available"})
         return
-
-    run = runs["items"][0]
 
     # Analyse results
     context_dir = os.path.join(ROOT_DIR, "storage", "auto_improve_context",
