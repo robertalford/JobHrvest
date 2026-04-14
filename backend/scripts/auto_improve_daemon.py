@@ -984,9 +984,41 @@ def _install_signal_handlers():
     signal.signal(signal.SIGINT, _graceful)
 
 
+def _cleanup_stale_running_rows() -> None:
+    """Cancel any leftover running_codex / analysing / deploying / testing rows
+    in `codex_improvement_runs` that pre-date this daemon process.
+
+    A previous daemon could have been killed mid-iteration (SIGKILL after
+    timeout, deploy etc.) leaving rows stuck in an in-progress state. The UI
+    then shows them as duplicate "Running Codex" entries forever. Run this
+    once on startup so the table reflects reality from the moment the new
+    daemon comes online.
+    """
+    try:
+        result = subprocess.run([
+            "docker", "exec", "jobharvest-postgres", "psql",
+            "-U", "jobharvest", "-d", "jobharvest", "-tA", "-c",
+            (
+                "UPDATE codex_improvement_runs "
+                "SET status='cancelled', "
+                "    error_message=COALESCE(error_message,'') || "
+                "      ' [Daemon restart: cancelled stale in-progress row]' "
+                "WHERE status IN ('analysing','running_codex','deploying','testing') "
+                "RETURNING id"
+            ),
+        ], capture_output=True, text=True, timeout=10)
+        cancelled = [l for l in (result.stdout or "").split("\n") if l.strip()]
+        if cancelled:
+            log(f"🧹 Cancelled {len(cancelled)} stale in-progress improvement run(s) on startup")
+    except Exception as e:  # noqa: BLE001 — non-fatal hygiene
+        log(f"⚠️ stale-row cleanup failed: {e}")
+
+
 def main():
     _install_signal_handlers()
     threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+
+    _cleanup_stale_running_rows()
 
     log("🚀 Auto-improve daemon started")
     log(f"  Codex model: {CODEX_MODEL}")

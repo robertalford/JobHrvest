@@ -219,10 +219,17 @@ const IMPROVEMENT_STATUS: Record<string, { label: string; cls: string; icon: Rea
   completed:    { label: 'Completed',    cls: 'bg-green-100 text-green-700',   icon: CheckCircle },
   failed:       { label: 'Failed',       cls: 'bg-red-100 text-red-600',       icon: AlertCircle },
   skipped:      { label: 'Skipped',      cls: 'bg-gray-100 text-gray-600',     icon: Clock },
+  cancelled:    { label: 'Cancelled',    cls: 'bg-gray-100 text-gray-500',     icon: AlertCircle },
 };
 
 function ImprovementStatusBadge({ status }: { status: string }) {
-  const s = IMPROVEMENT_STATUS[status] ?? IMPROVEMENT_STATUS.analysing;
+  // Unknown status → show its raw label rather than silently falling back to
+  // "Analysing" (which incorrectly suggests in-progress for cancelled rows).
+  const s = IMPROVEMENT_STATUS[status] ?? {
+    label: (status || 'Unknown').replace(/_/g, ' '),
+    cls: 'bg-gray-100 text-gray-600',
+    icon: AlertCircle,
+  };
   const Icon = s.icon;
   const inProgress = ['analysing', 'running_codex', 'deploying', 'testing'].includes(status);
   return (
@@ -234,7 +241,11 @@ function ImprovementStatusBadge({ status }: { status: string }) {
 }
 
 /* ── Timestamp display for run rows ── */
-function RunTimestamp({ startedAt, completedAt }: { startedAt?: string | null; completedAt?: string | null }) {
+function RunTimestamp({ startedAt, completedAt, status }: {
+  startedAt?: string | null;
+  completedAt?: string | null;
+  status?: string | null;
+}) {
   if (!startedAt) return <span className="text-xs text-gray-400">—</span>;
   const start = new Date(startedAt);
   const end = completedAt ? new Date(completedAt) : null;
@@ -244,12 +255,22 @@ function RunTimestamp({ startedAt, completedAt }: { startedAt?: string | null; c
     const secs = Math.floor((ms % 60000) / 1000);
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
   })() : null;
+  // Only show "In progress…" for genuinely in-progress statuses. Cancelled
+  // / failed / skipped runs don't always have completed_at populated, so
+  // relying on `!end` alone produced the misleading "Cancelled + In
+  // progress…" combination on the Models page.
+  const inProgress = !end && (
+    !status ||
+    ['analysing', 'running_codex', 'deploying', 'testing', 'running'].includes(status)
+  );
+  const stoppedNoEnd = !end && !inProgress;
   return (
     <div className="text-[10px] text-gray-400 space-y-0">
       <div>Start: {start.toLocaleString()}</div>
       {end && <div>End: {end.toLocaleString()}</div>}
       {durationStr && <div>Duration: {durationStr}</div>}
-      {!end && <div className="text-amber-500 font-medium">In progress...</div>}
+      {inProgress && <div className="text-amber-500 font-medium">In progress...</div>}
+      {stoppedNoEnd && <div className="text-gray-400">{status?.replace(/_/g, ' ') || 'stopped'}</div>}
     </div>
   );
 }
@@ -333,7 +354,7 @@ function TestRunsTable({ items, isLoading, modalModelId, setModalModelId, setMod
                 <div className="font-medium text-gray-900 text-sm truncate">{m.name}</div>
                 {m.description && <div className="text-xs text-gray-400 mt-0.5 line-clamp-2">{m.description}</div>}
                 {m.latest_test_run && (
-                  <RunTimestamp startedAt={m.latest_test_run.started_at} completedAt={m.latest_test_run.completed_at} />
+                  <RunTimestamp startedAt={m.latest_test_run.started_at} completedAt={m.latest_test_run.completed_at} status={m.latest_test_run.status} />
                 )}
               </td>
               <td className="px-4 py-3">
@@ -776,7 +797,7 @@ export function Models() {
                               )}
                             </td>
                             <td className="px-3 py-3">
-                              <RunTimestamp startedAt={ir.started_at} completedAt={ir.completed_at} />
+                              <RunTimestamp startedAt={ir.started_at} completedAt={ir.completed_at} status={ir.status} />
                             </td>
                             <td className="px-3 py-2 text-right">
                               {inProgress && <Loader2 className="w-4 h-4 animate-spin text-purple-500 inline" />}
@@ -808,7 +829,7 @@ export function Models() {
                               <AllTabTestSummary m={m} />
                             </td>
                             <td className="px-3 py-3">
-                              <RunTimestamp startedAt={m.latest_test_run?.started_at} completedAt={m.latest_test_run?.completed_at} />
+                              <RunTimestamp startedAt={m.latest_test_run?.started_at} completedAt={m.latest_test_run?.completed_at} status={m.latest_test_run?.status} />
                             </td>
                             <td className="px-3 py-2 text-right">
                               <div className="flex flex-col gap-1 items-end">
@@ -890,7 +911,7 @@ export function Models() {
                       )}
                     </td>
                     <td className="px-3 py-3">
-                      <RunTimestamp startedAt={ir.started_at} completedAt={ir.completed_at} />
+                      <RunTimestamp startedAt={ir.started_at} completedAt={ir.completed_at} status={ir.status} />
                     </td>
                   </tr>
                 );
