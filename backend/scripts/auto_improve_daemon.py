@@ -315,6 +315,34 @@ def is_test_running(token: str) -> bool:
     return False
 
 
+def _current_champion_tag(token: str) -> str | None:
+    """Return the live champion's normalised version tag (e.g. 'v91') or None.
+
+    Used by the fixture harness to compare challenger vs champion offline.
+    Falls back to the highest-numbered extractor file on disk if the API
+    doesn't expose a live model.
+    """
+    try:
+        models = get_models(token)
+        for m in models:
+            status = (m.get("status") or "").lower()
+            name = m.get("name") or ""
+            if status in ("live", "champion") and name.startswith("v"):
+                return name.replace(".", "")
+    except Exception:
+        pass
+    # Fallback: pick the highest-numbered file (excluding the one we just wrote
+    # if the caller mutates PROJECT_DIR-level state; we leave that to the caller)
+    import glob
+    paths = glob.glob(os.path.join(PROJECT_DIR, "app", "crawlers", "tiered_extractor_v*.py"))
+    best = 0
+    for p in paths:
+        m = re.search(r"tiered_extractor_v(\d+)\.py", p)
+        if m:
+            best = max(best, int(m.group(1)))
+    return f"v{best}" if best else None
+
+
 def _extract_version(name: str) -> int | None:
     """Extract file version number from model name. 'v1.9' → 19, 'v2.0' → 20."""
     match = re.search(r"v(\d+)\.(\d+)", name)
@@ -858,6 +886,37 @@ def run_improvement(model: dict, token: str):
                 "error_message": f"Import failed: {verify.stderr[:200]}",
             })
         return
+
+    # Fixture smoke verification — runs in seconds vs the full A/B (10-30min).
+    # Gated by FIXTURE_VERIFY_ENABLED so we can disable quickly if fixtures
+    # drift or the harness produces noise. A significant regression aborts
+    # the cycle before we spend A/B budget.
+    if os.environ.get("FIXTURE_VERIFY_ENABLED", "1") == "1":
+        champion_tag = _current_champion_tag(token)
+        log(f"🧪 Running fixture harness: challenger={next_version} champion={champion_tag or 'none'}")
+        cmd = [
+            "docker", "exec", "jobharvest-api", "python3", "-m",
+            "scripts.verify_challenger",
+            "--version", next_version.replace(".", ""),
+            "--tolerance", os.environ.get("FIXTURE_TOLERANCE", "2.0"),
+        ]
+        if champion_tag:
+            cmd.extend(["--champion", champion_tag])
+        fixture_res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if fixture_res.returncode == 1:
+            # Challenger regressed beyond tolerance — skip the full A/B
+            log(f"❌ Fixture smoke failed — skipping full A/B test")
+            log(f"   stdout tail: {(fixture_res.stdout or '')[-500:]}")
+            if imp_run_id:
+                _update_improvement_run(token, imp_run_id, {
+                    "status": "failed",
+                    "error_message": "Fixture smoke regressed beyond tolerance",
+                })
+            return
+        elif fixture_res.returncode == 2:
+            log("⚠️ Fixture harness could not run (no fixtures yet?) — proceeding to A/B")
+        else:
+            log("✅ Fixture smoke passed — proceeding to A/B")
 
     # Create model
     token = get_token()

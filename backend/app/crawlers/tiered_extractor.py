@@ -412,10 +412,17 @@ def _child_signature(el: etree._Element) -> str:
 class TieredExtractor:
     """3-tier hybrid extraction engine for job listings.
 
+    Tier 0.5 (new): Learned ATS templates — modal selectors from Jobstream
     Tier 1: ATS template library — deterministic, hardcoded selectors
     Tier 2: Heuristic structural analysis — pattern-based scoring
     Tier 3: LLM-assisted extraction — deferred (returns None)
+
+    Post-extraction: detail-page enrichment (toggle via `enable_detail_enrichment`).
     """
+
+    # Per-instance toggle so Codex-generated subclasses can disable enrichment
+    # temporarily without changing the base class.
+    enable_detail_enrichment: bool = True
 
     async def extract(self, career_page, company, html: str) -> list[dict]:
         """Extract job listings from HTML using the tiered approach.
@@ -437,13 +444,29 @@ class TieredExtractor:
             logger.info("SPA shell detected for %s — needs JS rendering", url)
             return []
 
+        # Tier 0.5: learned ATS template library — selectors clustered from the
+        # Jobstream baseline wrappers in fixed_test_sites. Wins over Tier 1 only
+        # if it produces >= MIN_JOBS_FOR_SUCCESS valid jobs; otherwise we fall
+        # through so hardcoded templates + heuristics still get their shot.
+        tier05_result = self._extract_tier_learned_ats(url, html)
+        if tier05_result and len(tier05_result) >= MIN_JOBS_FOR_SUCCESS:
+            logger.info(
+                "Tier 0.5 (learned ATS) extracted %d jobs from %s",
+                len(tier05_result), url,
+            )
+            return await self._finalize_with_enrichment(
+                tier05_result[:MAX_JOBS_PER_PAGE], url, ats_hint=None,
+            )
+
         # Tier 1: ATS template extraction
         tier1_result = self._extract_tier1_ats(url, html)
         if tier1_result and len(tier1_result) >= MIN_JOBS_FOR_SUCCESS:
             logger.info(
                 "Tier 1 (ATS) extracted %d jobs from %s", len(tier1_result), url
             )
-            return tier1_result[:MAX_JOBS_PER_PAGE]
+            return await self._finalize_with_enrichment(
+                tier1_result[:MAX_JOBS_PER_PAGE], url, ats_hint=self._detect_ats(url),
+            )
 
         # Tier 2: Heuristic structural analysis
         tier2_result = self._extract_tier2_heuristic(url, html)
@@ -453,7 +476,9 @@ class TieredExtractor:
                 len(tier2_result),
                 url,
             )
-            return tier2_result[:MAX_JOBS_PER_PAGE]
+            return await self._finalize_with_enrichment(
+                tier2_result[:MAX_JOBS_PER_PAGE], url, ats_hint=self._detect_ats(url),
+            )
 
         # Tier 3: LLM-assisted (deferred)
         tier3_result = self._extract_tier3_llm(url, html)
@@ -461,7 +486,9 @@ class TieredExtractor:
             logger.info(
                 "Tier 3 (LLM) extracted %d jobs from %s", len(tier3_result), url
             )
-            return tier3_result[:MAX_JOBS_PER_PAGE]
+            return await self._finalize_with_enrichment(
+                tier3_result[:MAX_JOBS_PER_PAGE], url, ats_hint=self._detect_ats(url),
+            )
 
         # All tiers failed — return whatever partial results we have
         # Prefer tier1 partial > tier2 partial > empty
@@ -472,10 +499,105 @@ class TieredExtractor:
                     len(partial),
                     url,
                 )
-                return partial[:MAX_JOBS_PER_PAGE]
+                return await self._finalize_with_enrichment(
+                    partial[:MAX_JOBS_PER_PAGE], url, ats_hint=self._detect_ats(url),
+                )
 
         logger.info("No jobs extracted from %s across all tiers", url)
         return []
+
+    # ------------------------------------------------------------------
+    # Finalize: detail-page enrichment (fills blank fields from per-job URLs)
+    # ------------------------------------------------------------------
+
+    async def _finalize_with_enrichment(
+        self, jobs: list[dict], url: str, *, ats_hint: Optional[str] = None,
+    ) -> list[dict]:
+        """Run the detail enricher if enabled, otherwise return jobs unchanged.
+
+        Swallows all enricher errors — the base extraction is the source of
+        truth; enrichment is additive.
+        """
+        if not self.enable_detail_enrichment or not jobs:
+            return jobs
+        try:
+            from app.crawlers.detail_enricher import DetailEnricher, EnrichmentBudget
+            from app.crawlers.http_client import ResilientHTTPClient
+        except ImportError:
+            return jobs
+
+        # If every job already has a dense description, don't even start.
+        if all(len((j.get("description") or "").strip()) >= 400 for j in jobs):
+            return jobs
+
+        # Resolve an ATS label for template lookup (detail selectors).
+        ats = ats_hint
+        if not ats:
+            try:
+                from app.crawlers.ats_template_loader import detect_ats
+                ats = detect_ats(url, html=None)
+            except ImportError:
+                ats = None
+
+        client = ResilientHTTPClient()
+
+        async def _fetch(u: str) -> str:
+            try:
+                resp = await client.get(u)
+                return resp.text if hasattr(resp, "text") else ""
+            except Exception:  # noqa: BLE001
+                return ""
+
+        try:
+            enricher = DetailEnricher(http_fetch=_fetch, budget=EnrichmentBudget())
+            await enricher.enrich(jobs, ats=ats, page_url=url)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("detail enrichment failed for %s: %s", url, e)
+        return jobs
+
+    # ------------------------------------------------------------------
+    # Tier 0.5: Learned ATS Templates (from Jobstream baseline wrappers)
+    # ------------------------------------------------------------------
+
+    def _extract_tier_learned_ats(self, url: str, html: str) -> Optional[list[dict]]:
+        """Apply a learned ATS template when one matches.
+
+        Templates are generated offline by `scripts/build_ats_templates.py`,
+        which collapses per-site Jobstream wrappers into per-ATS modal
+        selectors. We lean on JobExtractor._static_extract_wrapper for the
+        actual selector application so this path stays byte-for-byte
+        consistent with the silver-label bootstrap and the baseline phase of
+        A/B tests.
+        """
+        try:
+            from app.crawlers.ats_template_loader import default_loader
+            from app.crawlers.job_extractor import JobExtractor
+        except ImportError:
+            return None
+
+        found = default_loader.detect_and_lookup(url, html)
+        if not found:
+            return None
+        ats, template = found
+        list_selectors = (template or {}).get("list_selectors") or {}
+        if not list_selectors.get("record_boundary_path"):
+            # Template is incomplete — fall through to hardcoded Tier 1
+            return None
+
+        try:
+            jobs = JobExtractor._static_extract_wrapper(html, url, list_selectors)
+        except Exception as e:  # noqa: BLE001 — defensive; never break extract()
+            logger.warning("Tier 0.5 (learned ATS=%s) extraction failed: %s", ats, e)
+            return None
+
+        if not jobs:
+            return None
+
+        # Annotate with extraction method so downstream can see this path fired
+        for j in jobs:
+            j.setdefault("extraction_method", f"ats_template_learned:{ats}")
+            j.setdefault("extraction_confidence", 0.85)
+        return jobs
 
     # ------------------------------------------------------------------
     # Tier 1: ATS Template Library

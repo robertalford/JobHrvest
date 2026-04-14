@@ -89,9 +89,26 @@ class HoldoutEvaluator:
         *,
         snapshot_loader: Callable[[GoldHoldoutSnapshot], Awaitable[bytes]],
         career_page_threshold: float = 0.5,
+        silver_weight: float = 0.5,
+        include_suspect: bool = False,
     ):
+        """Evaluator supports a mix of verification statuses.
+
+        Args:
+            snapshot_loader: async callable returning raw HTML bytes.
+            career_page_threshold: threshold for the binary career-page classifier.
+            silver_weight: weight applied to silver-labelled (auto-generated)
+                ground-truth jobs when aggregating metrics. Defaults to 0.5
+                so one gold job counts as two silver jobs. Set to 1.0 to
+                treat them equally.
+            include_suspect: when False (default) rows with verification_status
+                == 'suspect' are excluded from scoring entirely. Flip on only
+                for debugging.
+        """
         self.load_snapshot = snapshot_loader
         self.threshold = career_page_threshold
+        self.silver_weight = max(0.0, min(1.0, silver_weight))
+        self.include_suspect = include_suspect
 
     async def evaluate(
         self,
@@ -172,17 +189,34 @@ class HoldoutEvaluator:
 
         result.extracted_count = len(extracted)
 
-        # Compare against verified ground-truth jobs if any exist
-        gold_jobs = await session.execute(
-            select(GoldHoldoutJob).where(GoldHoldoutJob.holdout_domain_id == domain.id)
-        )
-        gold_titles = [j.title for j in gold_jobs.scalars().all()]
-        if gold_titles:
+        # Compare against verified ground-truth jobs if any exist. Gold labels
+        # are authoritative (weight 1.0); silver labels (auto-generated from
+        # baseline wrappers) count fractionally so they multiply eval volume
+        # without dominating the decision. Suspect rows are excluded by default.
+        stmt = select(GoldHoldoutJob).where(GoldHoldoutJob.holdout_domain_id == domain.id)
+        gold_jobs_all = list((await session.execute(stmt)).scalars().all())
+        usable = [
+            j for j in gold_jobs_all
+            if j.verification_status != "suspect" or self.include_suspect
+        ]
+        if usable:
+            gold_titles = [j.title for j in usable if j.verification_status == "gold"]
+            silver_titles = [j.title for j in usable if j.verification_status != "gold"]
             extracted_titles = [j.get("title", "") for j in extracted]
-            matched = _count_fuzzy_title_matches(gold_titles, extracted_titles)
-            result.matched_titles = matched
-            result.title_accuracy = matched / len(gold_titles)
-            result.job_coverage = min(result.extracted_count / len(gold_titles), 1.0)
+
+            # Weighted matched/total counts: gold worth 1.0, silver worth silver_weight.
+            matched_gold = _count_fuzzy_title_matches(gold_titles, extracted_titles)
+            matched_silver = _count_fuzzy_title_matches(silver_titles, extracted_titles)
+            weighted_matched = matched_gold + self.silver_weight * matched_silver
+            weighted_total = len(gold_titles) + self.silver_weight * len(silver_titles)
+
+            result.matched_titles = int(round(weighted_matched))
+            result.title_accuracy = (
+                weighted_matched / weighted_total if weighted_total > 0 else 0.0
+            )
+            result.job_coverage = min(
+                result.extracted_count / weighted_total, 1.0
+            ) if weighted_total > 0 else 0.0
         elif domain.expected_job_count and domain.expected_job_count > 0:
             # Fall back to the lead_import expected count as a soft signal
             result.job_coverage = min(

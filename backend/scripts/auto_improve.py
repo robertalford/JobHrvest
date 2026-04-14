@@ -36,6 +36,26 @@ CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.3-codex")
 SAMPLE_SIZE = 40  # 20 regression (from prev run) + 20 new sites
 MAX_FAILURES_IN_PROMPT = 8  # Limit failures in prompt to avoid token overflow
 MAX_HTML_SNIPPET = 1500  # Max chars of HTML per failure (was 3000, too large)
+MAX_DETAIL_HTML_SNIPPET = 3000  # detail pages are denser and deserve more budget
+PROMPT_MAX_BYTES = 28 * 1024  # 28KB ceiling — keeps Codex context coherent
+# Multi-candidate generation: how many parallel Codex runs per cycle. Each
+# runs with a distinct FOCUS DIRECTIVE; the best by fixture composite wins.
+# Defaults to 1 (current behaviour). Bump to 3 only after the fixture harness
+# has enough silver labels to differentiate candidates meaningfully.
+AUTO_IMPROVE_CANDIDATES_N = int(os.environ.get("AUTO_IMPROVE_CANDIDATES_N", "1"))
+
+# Focus directives used by multi-candidate mode. Order matters — the first one
+# is always used when N=1, so keep it the most broadly-applicable.
+DEFAULT_FOCUS_DIRECTIVES = (
+    "Fix the biggest ATS cluster in the next-iteration brief. Address it with "
+    "a single platform-level handler that generalises across 3+ failing sites.",
+    "Focus on detail-page enrichment for jobs whose listing-description is "
+    "short. Prefer to extend the base enrichment rather than add site-specific "
+    "selectors. Target the `field_completeness` axis.",
+    "Simplify. Remove dead code or over-specific patterns introduced in the "
+    "last 3 iterations. Keep all current regression wins; surface where "
+    "recent complexity no longer pays for itself.",
+)
 
 
 def get_token() -> str:
@@ -96,6 +116,58 @@ def fetch_failure_html(url: str) -> str:
         return f"<!-- FETCH FAILED: {e} -->"
 
 
+def _detail_page_url_for(entry: dict) -> str | None:
+    """Pick a detail-page URL to fetch alongside the listing HTML.
+
+    Prefers the first job's `source_url` from the *baseline* (Jobstream)
+    extraction — that's the detail URL we know the baseline uses to pull
+    richer description/location/salary. Falls back to the first model-extracted
+    job if baseline data is absent.
+    """
+    # baseline_full_wrapper may carry details paths even if we can't see the jobs
+    wrapper = entry.get("baseline_full_wrapper") or {}
+    if not isinstance(wrapper, dict):
+        wrapper = {}
+    has_detail_paths = bool(
+        wrapper.get("details_page_description_paths")
+        or wrapper.get("details_page_location_paths")
+    )
+
+    for key in ("baseline_extracted_jobs", "model_extracted_jobs"):
+        jobs = entry.get(key) or []
+        if not jobs:
+            continue
+        url = (jobs[0] or {}).get("source_url") if isinstance(jobs[0], dict) else None
+        if url:
+            return url if has_detail_paths or key == "baseline_extracted_jobs" else None
+    return None
+
+
+def _compact_baseline_selectors(entry: dict) -> dict:
+    """Extract a compact selector hint from baseline_full_wrapper.
+
+    Shared helper with failure_analysis.build_next_iteration_brief — we want the
+    Codex prompt and the brief to describe selectors the same way.
+    """
+    w = entry.get("baseline_full_wrapper") or {}
+    if not isinstance(w, dict):
+        return {}
+    keys = (
+        "boundary", "title", "location", "salary", "employment_type",
+        "description", "apply_url",
+        "details_page_description_paths", "details_page_location_paths",
+        "list_url_pattern", "pagination",
+    )
+    out: dict = {}
+    for k in keys:
+        if k in w and w[k]:
+            v = w[k]
+            if isinstance(v, str) and len(v) > 300:
+                v = v[:297] + "..."
+            out[k] = v
+    return out
+
+
 def analyse_results(run: dict, context_dir: str) -> dict:
     """Extract failure details, write context files (HTML + wrappers) for Codex."""
     import random
@@ -129,6 +201,7 @@ def analyse_results(run: dict, context_dir: str) -> dict:
             "baseline_quality": baseline.get("quality_score", 0),
             "baseline_fields": baseline.get("fields", {}),
             "baseline_sample_desc": baseline_descs[0] if baseline_descs else "",
+            "baseline_extracted_jobs": baseline.get("extracted_jobs", [])[:3],
             "model_jobs": model.get("jobs", 0),
             "model_jobs_quality": model.get("jobs_quality", model.get("jobs", 0)),
             "model_titles": model.get("sample_titles", [])[:3],
@@ -139,6 +212,9 @@ def analyse_results(run: dict, context_dir: str) -> dict:
             "model_quality": model.get("quality_score", 0),
             "model_fields": model.get("fields", {}),
             "model_sample_desc": model_descs[0] if model_descs else "",
+            "model_extracted_jobs": model.get("extracted_jobs", [])[:3],
+            "ats_platform": (s.get("ats_platform") or baseline.get("ats_platform")
+                             or model.get("ats_platform")),
         }
         # Compute volume ratio — how much of the baseline's jobs did the model capture?
         bj = entry["baseline_jobs"]
@@ -184,6 +260,21 @@ def analyse_results(run: dict, context_dir: str) -> dict:
             with open(wrapper_file, "w") as fh:
                 json.dump(f["baseline_full_wrapper"], fh, indent=2)
             f["wrapper_file"] = wrapper_file
+
+        # NEW: fetch the first detail page when baseline uses details_page_*
+        # selectors. The detail page is where description/location/salary live
+        # on most ATS-backed sites — showing Codex the exact page it would need
+        # to traverse is the single biggest unlock for field_completeness.
+        detail_url = _detail_page_url_for(f)
+        if detail_url:
+            detail_html = fetch_failure_html(detail_url)
+            detail_file = os.path.join(context_dir, f"{kind}_{i+1}_{slug}_detail.html")
+            with open(detail_file, "w", encoding="utf-8") as fh:
+                # Cap at MAX_DETAIL_HTML_SNIPPET — Codex doesn't need the footer
+                fh.write(detail_html[:MAX_DETAIL_HTML_SNIPPET * 8]
+                         if detail_html else "<!-- detail fetch returned empty -->")
+            f["detail_html_file"] = detail_file
+            f["detail_url"] = detail_url
 
     # Spot-check successes
     spot_checks = random.sample(successes, min(3, len(successes)))
@@ -259,11 +350,26 @@ def _regression_alert(current_accuracy: float, best_accuracy: float) -> str:
     )
 
 
-def build_prompt(analysis: dict, current_model: dict, next_version: str, best_accuracy: float = 0.66) -> str:
+def build_prompt(
+    analysis: dict,
+    current_model: dict,
+    next_version: str,
+    best_accuracy: float = 0.66,
+    focus_directive: str | None = None,
+) -> str:
     """Build the improvement prompt for Codex.
 
     Reads the base prompt from new-prompt.md (the canonical auto-improve instructions)
-    and appends dynamic test results, failure analysis, and context file paths.
+    and appends:
+      1. A next-iteration brief (from failure_analysis.build_next_iteration_brief)
+         that names the weakest axis + highest-impact ATS cluster + detail-page
+         candidates. Prepended to the prompt so Codex reads it first.
+      2. Per-failure baseline wrapper selectors inlined (compact JSON).
+      3. Detail-page HTML references when the baseline traverses detail pages.
+      4. Optional focus_directive (used by multi-candidate generation).
+
+    Enforces PROMPT_MAX_BYTES as a soft ceiling — context files stay, only the
+    narrative sections are trimmed if we overshoot.
     """
     current_name = current_model["name"]
     current_desc = current_model.get("description", "")
@@ -280,26 +386,82 @@ def build_prompt(analysis: dict, current_model: dict, next_version: str, best_ac
     except FileNotFoundError:
         base_prompt = "# Auto-Improve Agent\n\nRead agent-instructions.md and storage/auto_improve_memory.json for full context.\n"
 
-    # Build dynamic failure details
+    # Build the next-iteration brief + pull top-3 past plays. Both are imported
+    # locally so we don't hard-depend on the backend package when auto_improve
+    # is run outside the container (unit tests, dry runs).
+    brief_section = ""
+    plays_section = ""
+    query_summary = ""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(PROJECT_DIR), "backend"))
+        from app.ml.champion_challenger.failure_analysis import (  # type: ignore
+            build_next_iteration_brief,
+            format_brief_for_prompt,
+        )
+        brief = build_next_iteration_brief(analysis)
+        brief_section = format_brief_for_prompt(brief)
+        # Build a query summary from the brief's headline axis + ATS list;
+        # this is what we semantically match against past plays.
+        axis = brief.get("top_axis_to_fix") or ""
+        ats_list = ", ".join(c.get("ats", "") for c in brief.get("ats_clusters") or [])
+        query_summary = f"Target axis {axis}. ATS clusters: {ats_list}"
+    except Exception as e:  # noqa: BLE001 — brief is advisory
+        print(f"[auto_improve] could not build next-iteration brief: {e}")
+
+    try:
+        from app.ml.champion_challenger.play_library import (  # type: ignore
+            default_library, format_plays_for_prompt,
+        )
+        top_plays = default_library.retrieve(query_summary or current_name, k=3)
+        plays_section = format_plays_for_prompt(top_plays)
+    except Exception as e:  # noqa: BLE001 — library is advisory
+        print(f"[auto_improve] could not retrieve play library: {e}")
+
+    focus_section = ""
+    if focus_directive:
+        focus_section = f"""
+## FOCUS DIRECTIVE (this candidate only)
+
+{focus_directive}
+
+Other candidates in this cycle may pursue different focuses — pick the most
+impactful single change under this directive and resist scope creep.
+"""
+
+    # Build dynamic failure details. Baseline selectors are inlined as compact
+    # JSON so Codex sees the exact wrapper keys that would have solved the case
+    # without opening a side-file.
     failures_text = ""
     for i, f in enumerate(analysis["failures"]):
+        hint = _compact_baseline_selectors(f)
+        hint_json = json.dumps(hint, ensure_ascii=False) if hint else "{}"
+        if len(hint_json) > 900:
+            hint_json = hint_json[:897] + "..."
+        detail_ref = ""
+        if f.get("detail_html_file"):
+            detail_ref = (
+                f"\n  Detail page (baseline traverses): {f.get('detail_url','?')}"
+                f"\n  Detail HTML saved to:            {f.get('detail_html_file')}"
+            )
         failures_text += f"""
 --- Failure {i+1}: {f['match']} ---
 Company: {f['company']}
-Domain: {f['domain']}
+Domain: {f['domain']}  |  ATS: {f.get('_ats', f.get('ats_platform','?'))}
 Test URL (known from test data): {f['test_url']}
 Baseline: {f['baseline_jobs']} jobs | Titles: {f['baseline_titles']}
-  Wrapper selectors: boundary={f.get('baseline_selectors', {}).get('boundary', '?')} | title={f.get('baseline_selectors', {}).get('title', '?')}
+  Baseline wrapper hint (COMPACT): {hint_json}
 Model: {f['model_jobs']} jobs ({f.get('volume_ratio', 0):.0%} of baseline) | Tier: {f['model_tier']} | Titles: {f['model_titles']}
   Discovery: {f['model_discovery']} → {f['model_url_found']}
-  Error: {f['model_error']}
+  Error: {f['model_error']}{detail_ref}
 Context files (READ THESE for full analysis):
   HTML (model's discovered page): {f.get('html_file', 'N/A')}
   HTML (baseline's test URL):     {f.get('baseline_html_file', 'same as above')}
   Full wrapper config (JSON):     {f.get('wrapper_file', 'N/A')}
 """
 
-    # Build gap details (partial matches — model found some jobs but not all)
+    # Build gap details (partial matches — model found some jobs but not all).
+    # Same compact-hint treatment as failures, plus side-by-side descriptions
+    # which are the highest-value signal for gaps.
     gaps_text = ""
     for i, g in enumerate(analysis.get("gaps", [])):
         desc_comparison = ""
@@ -310,16 +472,27 @@ Context files (READ THESE for full analysis):
   Description quality comparison (first job):
     Baseline: {repr(b_desc[:200]) if b_desc else '(empty)'}
     Model:    {repr(m_desc[:200]) if m_desc else '(empty)'}"""
+        hint = _compact_baseline_selectors(g)
+        hint_json = json.dumps(hint, ensure_ascii=False) if hint else "{}"
+        if len(hint_json) > 900:
+            hint_json = hint_json[:897] + "..."
+        detail_ref = ""
+        if g.get("detail_html_file"):
+            detail_ref = (
+                f"\n  Detail page (baseline traverses): {g.get('detail_url','?')}"
+                f"\n  Detail HTML saved to:            {g.get('detail_html_file')}"
+            )
 
         gaps_text += f"""
 --- Gap {i+1}: {g['match']} (volume ratio: {g.get('volume_ratio', 0):.0%}) ---
 Company: {g['company']}
-Domain: {g['domain']}
+Domain: {g['domain']}  |  ATS: {g.get('_ats', g.get('ats_platform','?'))}
 Test URL: {g['test_url']}
 Baseline: {g['baseline_jobs']} jobs | Quality: {g.get('baseline_quality', '?')}% | Titles: {g['baseline_titles']}
+  Baseline wrapper hint (COMPACT): {hint_json}
 Model: {g['model_jobs']} jobs ({g.get('volume_ratio', 0):.0%} of baseline) | Quality: {g.get('model_quality', '?')}% | Tier: {g['model_tier']}
   Titles: {g['model_titles']}
-  Discovery: {g['model_discovery']} → {g['model_url_found']}{desc_comparison}
+  Discovery: {g['model_discovery']} → {g['model_url_found']}{desc_comparison}{detail_ref}
 Context files:
   HTML: {g.get('html_file', 'N/A')}
   Baseline HTML: {g.get('baseline_html_file', 'same as above')}
@@ -470,7 +643,15 @@ FIX THEM FIRST. A model improvement is worthless if the extractor can't even imp
     except Exception:
         pass
 
-    prompt = f"""{base_prompt}
+    # Brief + focus directive + play-library exemplars go FIRST — Codex reads
+    # top-down and these are the most actionable pieces of this iteration's
+    # context. Exemplars sit below the brief so the axis-to-fix still leads.
+    prompt = f"""{brief_section}
+{plays_section}
+{focus_section}
+---
+
+{base_prompt}
 {self_improvement_section}
 {trend_section}
 ---
@@ -562,6 +743,17 @@ for j in jobs[:3]: print(j.get('title','?'), '|', j.get('location_raw',''), '|',
 
 {regression_alert}
 """
+    # Soft ceiling — we never want prompts so large they blow past Codex's
+    # useful-context window. Trim the spot-checks first (lowest signal), then
+    # gaps, then failures, keeping the brief + base prompt intact.
+    if len(prompt.encode("utf-8")) > PROMPT_MAX_BYTES:
+        for pattern in (
+            r"(?s)### Spot-Check Successes.*?(?=###|\Z)",
+            r"(?s)### Volume/Quality Gaps.*?(?=###|\Z)",
+        ):
+            prompt = re.sub(pattern, "", prompt, count=1)
+            if len(prompt.encode("utf-8")) <= PROMPT_MAX_BYTES:
+                break
     return prompt
 
 
@@ -743,6 +935,205 @@ def run_codex(prompt: str, working_dir: str, model_id: str = ""):
         return 1
 
 
+def _run_single_codex_candidate(
+    prompt: str,
+    working_dir: str,
+    model_id: str,
+    candidate_idx: int,
+    target_version_file_ver: int,
+) -> tuple[int, str | None]:
+    """Run one Codex invocation for multi-candidate mode.
+
+    The candidate writes to `tiered_extractor_v{VER}_cand{i}.py` and class
+    `TieredExtractorV{VER}Cand{i}` to avoid collisions. Returns
+    (exit_code, extractor_path_if_created).
+    """
+    cand_suffix = f"_cand{candidate_idx}"
+    target_file = os.path.join(
+        PROJECT_DIR, "app", "crawlers",
+        f"tiered_extractor_v{target_version_file_ver}{cand_suffix}.py",
+    )
+    target_class = f"TieredExtractorV{target_version_file_ver}Cand{candidate_idx}"
+
+    # Append a file-rename directive to the prompt so Codex writes to the
+    # per-candidate filename.
+    candidate_tail = f"""
+
+---
+
+## CANDIDATE {candidate_idx} FILE NAMING (IMPORTANT)
+
+This run is part of a multi-candidate batch. Do NOT write the new extractor
+to `tiered_extractor_v{target_version_file_ver}.py`. Instead write it to
+`backend/app/crawlers/tiered_extractor_v{target_version_file_ver}{cand_suffix}.py`
+with class name `{target_class}`. The best candidate across the batch will be
+promoted to the canonical filename after fixture evaluation.
+"""
+    exit_code = run_codex(
+        prompt + candidate_tail,
+        working_dir,
+        f"{model_id}_cand{candidate_idx}",
+    )
+    return exit_code, target_file if os.path.exists(target_file) else None
+
+
+def _score_candidate_via_fixtures(version_tag: str) -> float | None:
+    """Run the fixture harness on a candidate and return its composite score."""
+    report_path = os.path.join(
+        os.path.dirname(PROJECT_DIR),
+        "storage", "auto_improve_fixture_reports",
+        f"{version_tag}.json",
+    )
+    cmd = [
+        "python3", "-m", "scripts.verify_challenger",
+        "--version", version_tag,
+        "--json",
+    ]
+    try:
+        res = subprocess.run(
+            cmd, cwd=PROJECT_DIR, capture_output=True, text=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if res.returncode == 2:
+        # No fixtures — caller decides what to do
+        return None
+    try:
+        payload = json.loads(res.stdout)
+        return float(payload.get("challenger", {}).get("composite") or 0.0)
+    except (json.JSONDecodeError, TypeError):
+        # Fallback: parse the written report file
+        if os.path.exists(report_path):
+            try:
+                with open(report_path) as fh:
+                    payload = json.load(fh)
+                return float(payload.get("challenger", {}).get("composite") or 0.0)
+            except Exception:
+                return None
+        return None
+
+
+def generate_candidates(
+    prompt_base: str,
+    working_dir: str,
+    model_id: str,
+    next_version: str,
+    n: int,
+) -> str | None:
+    """Run N Codex candidates, pick the best by fixture composite, promote it.
+
+    Returns the canonical extractor file path on success, or None if all
+    candidates fail to produce a working extractor.
+    """
+    if n <= 1:
+        # Single-candidate mode: run the normal flow against canonical file
+        run_codex(prompt_base, working_dir, model_id)
+        file_ver = int(next_version.replace("v", "").replace(".", ""))
+        canonical = os.path.join(
+            PROJECT_DIR, "app", "crawlers", f"tiered_extractor_v{file_ver}.py",
+        )
+        return canonical if os.path.exists(canonical) else None
+
+    file_ver = int(next_version.replace("v", "").replace(".", ""))
+    canonical = os.path.join(
+        PROJECT_DIR, "app", "crawlers", f"tiered_extractor_v{file_ver}.py",
+    )
+
+    # Generate directives for N candidates (cycle through defaults; user can
+    # supply more via AUTO_IMPROVE_EXTRA_DIRECTIVES if needed later).
+    directives = list(DEFAULT_FOCUS_DIRECTIVES)
+    while len(directives) < n:
+        directives += list(DEFAULT_FOCUS_DIRECTIVES)
+    directives = directives[:n]
+
+    candidates: list[dict] = []
+    for i, directive in enumerate(directives, start=1):
+        print(f"[auto_improve] candidate {i}/{n} — {directive[:80]}")
+        # Re-compose the prompt with this candidate's directive. We use the
+        # simple textual injection pattern here rather than threading a param
+        # down through build_prompt() for each candidate.
+        prompt = prompt_base.replace(
+            "## FOCUS DIRECTIVE (this candidate only)",
+            f"## FOCUS DIRECTIVE (candidate {i}/{n})\n\n{directive}\n\n"
+            f"## FOCUS DIRECTIVE (this candidate only)",
+            1,
+        )
+        exit_code, path = _run_single_codex_candidate(
+            prompt, working_dir, model_id, i, file_ver,
+        )
+        candidates.append({
+            "idx": i,
+            "directive": directive,
+            "exit_code": exit_code,
+            "path": path,
+        })
+
+    # Score each candidate via the fixture harness
+    for c in candidates:
+        if not c["path"]:
+            c["composite"] = None
+            continue
+        tag = f"v{file_ver}cand{c['idx']}"
+        c["composite"] = _score_candidate_via_fixtures(tag)
+
+    # Archive everything for post-hoc analysis
+    from datetime import datetime as _dt
+    archive = os.path.join(
+        os.path.dirname(PROJECT_DIR), "storage",
+        "auto_improve_candidates",
+        _dt.now().strftime("%Y%m%d_%H%M%S_") + next_version,
+    )
+    os.makedirs(archive, exist_ok=True)
+    for c in candidates:
+        if c["path"] and os.path.exists(c["path"]):
+            import shutil
+            shutil.copy2(c["path"], os.path.join(archive, os.path.basename(c["path"])))
+    with open(os.path.join(archive, "summary.json"), "w") as fh:
+        json.dump(candidates, fh, indent=2, default=str)
+
+    # Winner: highest composite; break ties by smallest file (simplicity bias)
+    best = None
+    for c in candidates:
+        if not c["path"] or c["composite"] is None:
+            continue
+        size = os.path.getsize(c["path"]) if os.path.exists(c["path"]) else 10**9
+        score_key = (c["composite"], -size)
+        if best is None or score_key > best[0]:
+            best = (score_key, c)
+
+    if best is None:
+        print("[auto_improve] all candidates failed — no canonical file produced")
+        return None
+
+    _, winner = best
+    # Promote winner to canonical filename + class name
+    import shutil
+    winner_path: str = winner["path"]
+    with open(winner_path) as fh:
+        body = fh.read()
+    body = body.replace(
+        f"TieredExtractorV{file_ver}Cand{winner['idx']}",
+        f"TieredExtractorV{file_ver}",
+    ).replace(
+        f"_cand{winner['idx']}",
+        "",
+    )
+    with open(canonical, "w") as fh:
+        fh.write(body)
+    print(
+        f"[auto_improve] promoted candidate {winner['idx']} → {canonical} "
+        f"(composite={winner['composite']})"
+    )
+    # Remove the per-candidate files now that the winner is canonical
+    for c in candidates:
+        if c["path"] and os.path.exists(c["path"]):
+            try:
+                os.remove(c["path"])
+            except OSError:
+                pass
+    return canonical
+
+
 def run_iteration(token: str, model_id: str = None):
     """Run one iteration of the improvement loop."""
     # Get the latest model
@@ -813,8 +1204,17 @@ def run_iteration(token: str, model_id: str = None):
         f.write(prompt)
     print(f"Prompt saved to: {prompt_file}")
 
-    # Run Codex
-    exit_code = run_codex(prompt, os.path.dirname(PROJECT_DIR), model["id"])
+    # Run Codex — single-candidate (N=1) is the classic flow. N>1 spawns N
+    # parallel candidates, each with a distinct FOCUS DIRECTIVE, and picks the
+    # best by fixture composite before proceeding.
+    n_candidates = AUTO_IMPROVE_CANDIDATES_N
+    if n_candidates > 1:
+        canonical = generate_candidates(
+            prompt, os.path.dirname(PROJECT_DIR), model["id"], next_version, n_candidates,
+        )
+        exit_code = 0 if canonical else 1
+    else:
+        exit_code = run_codex(prompt, os.path.dirname(PROJECT_DIR), model["id"])
 
     if exit_code != 0:
         print(f"Codex exited with code {exit_code}. Checking if it created files anyway...")

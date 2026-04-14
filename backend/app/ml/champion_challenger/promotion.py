@@ -1,5 +1,11 @@
 """Promotion gates for champion/challenger comparisons.
 
+Also exports `record_promotion_to_play_library` — a thin helper that
+persists a Play when a challenger is promoted, so future iterations can
+retrieve it via RAG.
+
+
+
 A "primary score" point comparison is too noisy to drive an autonomous loop —
 a 0.5 percentage-point F1 difference on 100 examples is well within sampling
 noise. This module wraps:
@@ -156,16 +162,21 @@ def evaluate_gates(
     min_metrics_won: int = 2,
     p_value: float | None = None,
     p_value_threshold: float = 0.05,
+    gold_domains: int | None = None,
+    min_gold_domains: int = 0,
 ) -> PromotionDecision:
     """Decide whether to promote the challenger.
 
     A challenger is promoted only if:
       (a) it beats the champion by at least `min_delta` on at least
           `min_metrics_won` of the listed metrics, AND
-      (b) if `p_value` is provided, it must be <= `p_value_threshold`.
+      (b) if `p_value` is provided, it must be <= `p_value_threshold`, AND
+      (c) if `min_gold_domains` > 0, the holdout must contain at least that
+          many fully-verified (gold) domains — until we have enough gold
+          ground truth, silver-heavy decisions stay advisory.
 
-    Failing (a) → reject. Failing (b) but passing (a) → inconclusive (run
-    again with more data rather than promote on a noisy signal).
+    Failing (a) → reject. Failing (b) but passing (a) → inconclusive.
+    Failing (c) → inconclusive (decision is advisory; don't promote yet).
     """
     decision = PromotionDecision(verdict="reject")
     decision.n_metrics_required = min_metrics_won
@@ -206,5 +217,53 @@ def evaluate_gates(
         )
         return decision
 
+    if min_gold_domains > 0 and (gold_domains is None or gold_domains < min_gold_domains):
+        decision.verdict = "inconclusive"
+        decision.reasons.append(
+            f"only {gold_domains or 0} gold-verified domains available "
+            f"(need {min_gold_domains}) — decision is advisory until more are labelled"
+        )
+        return decision
+
     decision.verdict = "promote"
     return decision
+
+
+# ─── Play library recording ───────────────────────────────────────────────
+
+def record_promotion_to_play_library(
+    *,
+    version: str,
+    decision: "PromotionDecision",
+    summary: str,
+    ats_clusters_fixed: Sequence[str] = (),
+    diff_keywords: Sequence[str] = (),
+    notes: str | None = None,
+) -> None:
+    """Persist a Play row when a challenger has been promoted.
+
+    Safe to call unconditionally — does nothing when the play_library module
+    isn't importable (e.g. running in a sandbox without sklearn).
+    """
+    if decision.verdict != "promote":
+        return
+    try:
+        from app.ml.champion_challenger.play_library import Play, default_library
+    except ImportError:
+        return
+
+    axis_deltas = {k: float(v) for k, v in (decision.metric_deltas or {}).items()}
+    composite_delta = sum(axis_deltas.values()) if axis_deltas else 0.0
+    try:
+        default_library.record(Play(
+            version=version,
+            summary=summary.strip(),
+            axis_deltas=axis_deltas,
+            composite_delta=round(composite_delta, 3),
+            ats_clusters_fixed=list(ats_clusters_fixed),
+            diff_keywords=list(diff_keywords),
+            notes=notes,
+        ))
+    except Exception:
+        # Library persistence is best-effort; don't break promotions over it.
+        pass

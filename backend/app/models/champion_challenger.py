@@ -113,6 +113,14 @@ class GoldHoldoutJob(Base):
     location: Mapped[Optional[str]] = mapped_column(Text)
     employment_type: Mapped[Optional[str]] = mapped_column(Text)
     apply_url: Mapped[Optional[str]] = mapped_column(Text)
+    # gold = human-verified, silver = auto-labelled from baseline wrappers,
+    # suspect = silver but baseline vs expected_job_count differ >2x,
+    # unverified = placeholder until verification is performed.
+    verification_status: Mapped[str] = mapped_column(Text, default="unverified", nullable=False)
+    # 'manual' | 'baseline_wrapper' | 'llm' | etc.
+    source: Mapped[str] = mapped_column(Text, default="manual", nullable=False)
+    source_url: Mapped[Optional[str]] = mapped_column(Text)
+    description_length: Mapped[Optional[int]] = mapped_column(Integer)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     verified_by: Mapped[Optional[str]] = mapped_column(Text)
     notes: Mapped[Optional[str]] = mapped_column(Text)
