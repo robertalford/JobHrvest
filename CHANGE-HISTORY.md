@@ -2,6 +2,58 @@
 
 ---
 
+## 2026-04-14 (session 18 — Universality-first auto-improve: kill the regression cycle)
+
+**Prompt:**
+How can we better improve the system to ensure our holistic goal remains top of mind, and success is measured by the model's overall effectiveness (e.g. map any site), but also ensure that continuous improvement is made whereby each site tested is still analysed and changes made to the model that does allow it to map it better in the future?
+
+**Root cause:** the auto-improve loop exhibited *regression cycling* — iteration N fixed site A by breaking site B, iteration N+1 fixed B by breaking A, composite stayed ≈70%. Three structural gaps:
+
+1. **Failure signal is per-site, not per-pattern.** `backend/scripts/auto_improve.py` inlined up to 8 individual failure examples with company name, domain, and URL — biased Codex toward narrow fixes. The "must help 3+ sites" rule at `new-prompt.md:62` was prompt text only, never runtime-enforced.
+2. **Promotion gate is single-objective + local.** The 4-condition gate at `backend/app/tasks/ml_tasks.py:1075-1080` promoted any challenger whose global composite beat champion, as long as no site the *current* champion passed was lost. Blind to: cross-cluster trade-offs, ratcheting losses once the champion rolled forward, and cluster-variance regressions.
+3. **Memory carries anti-patterns, not a living regression set.** Every test run started from scratch on the same fixed sites; there was no persistence of *which sites any prior version had passed*.
+
+**Headline change:**
+Shipped all four layers of the universality-first redesign in one PR. The promotion gate now enforces 7 conditions (was 4), the Codex prompt leads with anonymised pattern cards for ≥3-site clusters instead of per-site named failures, and two new tables — `ever_passed_sites` + `site_result_history` — back an ever-passed ratchet and oscillation detector. Stratified scoring always caps each axis at 100 to defeat the known `field_completeness > 100` extraction-bug inflation. 14 new tests, 176/176 suite green (excluding pre-existing v9.1 fixture gaps).
+
+**Schema + tagging:**
+- NEW `backend/alembic/versions/0028_universality_gate.py` — adds `ever_passed_sites` (monotonic set keyed on url, remembers best-composite + best-version) and `site_result_history` (append-only per-site verdict log, auto-trimmed to last 20 per URL).
+- NEW `backend/app/models/universality.py` — ORM mappings. Registered in `backend/app/models/__init__.py`.
+- `backend/app/tasks/ml_tasks.py` — `_detect_entry_ats(url, known)` tags every result entry at creation time from baseline wrapper + URL substring match; `_refine_entry_ats(entry)` re-runs post-discovery to use URL-found + tier. Canonical ATS needle list (`_ATS_NEEDLES`) mirrors `failure_analysis._derive_ats` + `ml_models._stratum_key` — three call sites, one mapping.
+
+**L1 — Stratified composite + cluster gate:**
+- `backend/app/api/v1/endpoints/ml_models.py` — `_composite_score_standalone` gets optional `cap_axes=True` (defaults false for backcompat). NEW `_stratum_key`, `_composite_score_stratified`, `_cluster_gate_verdict`. Strata with <3 sites are reported but do not block (`MIN_STRATUM_SITES_FOR_GATE=3`); tolerance is `CLUSTER_REGRESSION_TOLERANCE=2.0` points. Worst-gate-eligible-cluster invariant: challenger's worst cluster must not drop below champion's worst by more than tolerance.
+- `backend/app/tasks/ml_tasks.py::_aggregate` — computes stratified scorecards for both phases, persists them in `summary.challenger_stratified` + `summary.champion_stratified`, runs `_cluster_gate_verdict`, stores verdict in `summary.cluster_gate`.
+
+**L2 — Ever-passed ratchet:**
+- NEW `backend/app/ml/champion_challenger/stability.py` — `upsert_ever_passed` (Postgres `ON CONFLICT DO UPDATE WHERE best_composite <= excluded`) ratchets only forward, `fetch_ever_passed_regressions` returns sites current run lost vs recorded best (±15% `EVER_PASSED_REGRESSION_SLACK_PCT` slack). Only ratcheted when the challenger is promoted OR first-run (avoid polluting with unvalidated wins).
+- Gate wired into `_aggregate` — promotion blocked on any non-empty regression list; surfaced in `summary.ever_passed_regressions`.
+- NEW `backend/scripts/backfill_ever_passed.py` — replays every completed `ml_model_test_runs.results_detail` into both new tables in chronological order. Run with `docker exec jobharvest-api python -m scripts.backfill_ever_passed`.
+
+**L3 — Pattern-card Codex prompt:**
+- `backend/scripts/auto_improve.py::build_prompt` — rewrote the failure-inlining block. Now leads with **Pattern Cards** (one per ≥3-site cluster: ATS label, aggregate volume, shared baseline wrapper hint, anonymised HTML filenames — no company names or URLs). Per-site drill-down is reserved for 1-2-site long-tail clusters. Gaps are folded into pattern cards alongside failures; the per-site gap block is now empty (kept as a stub for byte-budget regex compat).
+- `new-prompt.md` — §Promotion gate enumerates all 7 conditions and names each gate's enforcement location. §Three Data Signals renamed to "Pattern Cards, not per-site examples" with rationale that the old per-site prompt biased Codex toward narrow fixes.
+
+**L4 — Oscillation detector:**
+- `stability.py::record_run_history` appends one row per tested site per run, then deletes all but the last `HISTORY_KEEP_PER_SITE=20` per URL in a single window-function query.
+- `stability.compute_flip_counts` (pass→fail / fail→pass transitions in last N observations) + `stability.unstable_site_urls` (≥`min_flips=2`). Gate wired into `_aggregate`: challenger blocked if currently failing any unstable site.
+
+**Observability + endpoint:**
+- NEW `GET /api/v1/ml-models/{id}/stratum-report` in `backend/app/api/v1/endpoints/ml_models.py` — returns `{challenger, champion, cluster_gate, ever_passed_regressions, unstable_site_failures, promotion_decision}` for any (or the latest) test run. Recomputes on the fly for pre-0028 runs that didn't cache the stratified scorecards.
+
+**Tests (NEW):**
+- `backend/tests/unit/test_stratified_composite.py` — 9 tests covering stratum bucketing, gate eligibility threshold, regression blocking, improvement passing, small-cluster exemption, tolerance absorption, worst-invariant enforcement.
+- `backend/tests/unit/test_universality_stability.py` — 5 tests (DB-backed, use per-test `create_async_engine(NullPool)` so pytest-asyncio's per-test event loops don't cross-contaminate asyncpg connections): ratchet-only-forward semantics, regression detection, slack tolerance, oscillation flip counts, history trimming.
+
+**Deploy + backfill:**
+- `docker exec jobharvest-api alembic upgrade head` → 0027 → 0028 applied.
+- `docker exec jobharvest-api python -m scripts.backfill_ever_passed` → 2 ever-passed entries + 8 history rows seeded from the retained v6.9 benchmark run (`c1f3caac-ff49-44ea-bd51-b477b40a9d8b`). Historical DB only had one post-reset completed run; real data accrues from here.
+- Restarted api + 4 celery workers via `docker-compose.server.yml`. Health endpoint 200; stratum-report endpoint smoke-tested against live v6.9 champion — shows correctly capped axes (bespoke was 87.1 pre-cap, 61.6 post-cap; teamtailor was 1070 pre-cap, 45 post-cap).
+
+**Records updated:** agent-instructions.md (§Site Config promotion gate enumeration + new "Universality-First Auto-Improve" subsection), MEMORY.md (status + promotion-gate summary + cap-axes note), this file.
+
+---
+
 ## 2026-04-14 (session 17 — Auto-improve loop: context refresh + speed/token optimisation)
 
 **Prompt:**

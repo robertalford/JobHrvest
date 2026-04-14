@@ -778,6 +778,74 @@ async def get_test_run(model_id: UUID, run_id: UUID, db: AsyncSession = Depends(
     return _serialize_test_run(run)
 
 
+@router.get("/{model_id}/stratum-report")
+async def get_stratum_report(
+    model_id: UUID,
+    run_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the per-ATS stratified scorecard for a test run.
+
+    Powers the Models page's per-cluster visualisation. If `run_id` is omitted,
+    uses the model's most recent completed test run. Response shape:
+
+      {
+        "run_id": "...",
+        "challenger":  {all, by_stratum, worst_gate_eligible, ...},
+        "champion":    {all, by_stratum, worst_gate_eligible, ...} | null,
+        "cluster_gate": {passed, regressions, worst_comparison, ...} | null,
+        "ever_passed_regressions": [...] | [],
+        "unstable_site_failures":  [...] | [],
+      }
+    """
+    await _get_model_or_404(db, model_id)
+
+    from sqlalchemy import select as _sel
+    if run_id:
+        run = await db.get(MLModelTestRun, run_id)
+        if not run or run.model_id != model_id:
+            raise HTTPException(status_code=404, detail="Test run not found")
+    else:
+        stmt = (
+            _sel(MLModelTestRun)
+            .where(MLModelTestRun.model_id == model_id)
+            .where(MLModelTestRun.status == "completed")
+            .order_by(MLModelTestRun.started_at.desc())
+            .limit(1)
+        )
+        run = (await db.execute(stmt)).scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail="No completed test runs for this model")
+
+    rd = run.results_detail or {}
+    sites = rd.get("sites") or []
+    summary = rd.get("summary") or {}
+
+    # Prefer cached stratified scorecards (written by _aggregate). Recompute
+    # on the fly if the run was aggregated before 0028 shipped.
+    ch_strat = summary.get("challenger_stratified")
+    cp_strat = summary.get("champion_stratified")
+    cluster_gate = summary.get("cluster_gate")
+    if ch_strat is None and sites:
+        ch_strat = _composite_score_stratified(sites, "model")
+    if cp_strat is None and sites:
+        cp_strat = _composite_score_stratified(sites, "champion")
+    if cluster_gate is None and ch_strat and cp_strat:
+        cluster_gate = _cluster_gate_verdict(ch_strat, cp_strat)
+
+    return {
+        "run_id": str(run.id),
+        "model_id": str(model_id),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "challenger": ch_strat,
+        "champion": cp_strat,
+        "cluster_gate": cluster_gate,
+        "ever_passed_regressions": summary.get("ever_passed_regressions") or [],
+        "unstable_site_failures": summary.get("unstable_site_failures") or [],
+        "promotion_decision": summary.get("promotion_decision"),
+    }
+
+
 import math
 
 CORE_FIELDS = ["title", "source_url", "location_raw"]
@@ -789,8 +857,20 @@ DISPLAY_FIELDS = [
 ]
 
 
-def _composite_score_standalone(results: list[dict], phase_key: str) -> dict:
-    """Compute composite score for a model phase. Standalone version for use by Celery tasks."""
+def _composite_score_standalone(
+    results: list[dict], phase_key: str, *, cap_axes: bool = False,
+) -> dict:
+    """Compute composite score for a model phase. Standalone version for use by Celery tasks.
+
+    When `cap_axes=True`, each axis is clamped to [0, 100] before the weighted
+    composite is computed. agent-instructions.md §Site Config mandates the cap
+    when auditing historical runs or comparing candidates — raw values above
+    100 (common on `field_completeness` when an extractor over-counts) are
+    extraction bugs and must not inflate the composite. The cap is off by
+    default so callers auditing legacy test-run JSON see the same numbers the
+    legacy Models page has always shown; the stratified helper below opts in
+    to capping so the cluster gate is not fooled by over-counting.
+    """
     total = len(results)
     if total == 0:
         return {"composite": 0, "discovery": 0, "quality_extraction": 0,
@@ -841,6 +921,12 @@ def _composite_score_standalone(results: list[dict], phase_key: str) -> dict:
     else:
         volume_accuracy = 50 if model_total > 0 else 0
 
+    if cap_axes:
+        discovery_rate = min(100.0, max(0.0, discovery_rate))
+        quality_extraction_rate = min(100.0, max(0.0, quality_extraction_rate))
+        field_completeness = min(100.0, max(0.0, field_completeness))
+        volume_accuracy = min(100.0, max(0.0, volume_accuracy))
+
     composite = (
         0.20 * discovery_rate
         + 0.30 * quality_extraction_rate
@@ -854,6 +940,215 @@ def _composite_score_standalone(results: list[dict], phase_key: str) -> dict:
         "quality_extraction": round(quality_extraction_rate, 1),
         "field_completeness": round(field_completeness, 1),
         "volume_accuracy": round(volume_accuracy, 1),
+    }
+
+
+# Strata with fewer than this many sites are reported but do NOT block the
+# promotion gate. Matches the "must help 3+ sites" philosophy — a single-site
+# regression in an exploration ATS shouldn't veto a genuine improvement.
+MIN_STRATUM_SITES_FOR_GATE = 3
+
+# How many composite points a cluster is allowed to lose relative to the
+# champion before the promotion gate blocks. Noise floor of a single site's
+# contribution on a small cluster; wider clusters rarely move this much
+# between iterations unless a fix is actively eroding them.
+CLUSTER_REGRESSION_TOLERANCE = 2.0
+
+
+def _stratum_key(entry: dict) -> str:
+    """Bucket a result entry into a cluster label for stratified scoring.
+
+    Prefers an explicit ats_platform tag (populated by test_single_site when
+    Company.ats_platform is known OR when the detector fires). Falls back to
+    lightweight string matching on the discovery URL / baseline wrapper —
+    same approach as `failure_analysis._derive_ats`, intentionally kept
+    duplicated so this helper has no cross-module dependency at runtime.
+    """
+    tag = (entry.get("ats_platform") or "").strip().lower()
+    if tag and tag not in ("none", "null", "unknown"):
+        return tag
+
+    # Fallback string-match — the canonical list lives in
+    # failure_analysis._derive_ats. Keep them in sync when adding platforms.
+    wrapper = entry.get("baseline", {}).get("full_wrapper") or {}
+    model = entry.get("model") or {}
+    url_found = (model.get("url_found") or entry.get("url") or "").lower()
+    tier = (model.get("tier_used") or "").lower()
+    import json as _j
+    hay = " ".join([_j.dumps(wrapper)[:400].lower(), url_found, tier])
+    for needle, label in (
+        ("greenhouse", "greenhouse"),
+        ("lever.co", "lever"),
+        ("ashby", "ashby"),
+        ("workday", "workday"),
+        ("myworkdayjobs", "workday"),
+        ("bamboohr", "bamboohr"),
+        ("smartrecruiters", "smartrecruiters"),
+        ("icims", "icims"),
+        ("taleo", "taleo"),
+        ("successfactors", "successfactors"),
+        ("jobvite", "jobvite"),
+        ("breezy", "breezyhr"),
+        ("rippling", "rippling"),
+        ("oracle", "oracle_cx"),
+        ("salesforce", "salesforce"),
+        ("martianlogic", "martianlogic"),
+        ("pageup", "pageup"),
+        ("recruitee", "recruitee"),
+        ("teamtailor", "teamtailor"),
+    ):
+        if needle in hay:
+            return label
+
+    # Structural fallback — shape of the page determines the bucket when we
+    # can't name the ATS. These three buckets are deliberately coarse; fine
+    # per-platform detection is the stratum-key tagger's job, not this one.
+    if any(k in hay for k in ("__next_data__", "_next/data", "nuxt", "react-root")):
+        return "spa_shell"
+    if any(k in hay for k in ("wordpress", "elementor", "drupal", "joomla")):
+        return "generic_cms"
+    return "bespoke"
+
+
+def _composite_score_stratified(
+    results: list[dict],
+    phase_key: str,
+    *,
+    min_sites_for_gate: int = MIN_STRATUM_SITES_FOR_GATE,
+) -> dict:
+    """Compute the 4-axis composite per ATS stratum.
+
+    Returns a dict of the form:
+        {
+          "all": {...4-axis composite over all sites...},
+          "by_stratum": {
+            "workday":   {"composite": ..., "n": 7, "gate_eligible": True, ...},
+            "greenhouse": {"composite": ..., "n": 4, "gate_eligible": True, ...},
+            "bespoke":    {"composite": ..., "n": 2, "gate_eligible": False, ...},
+          },
+          "worst_gate_eligible": {"stratum": "workday", "composite": 72.1},
+          "n_strata_total": 6,
+          "n_strata_gate_eligible": 3,
+        }
+
+    The `all` scorecard matches `_composite_score_standalone(results, phase_key)`.
+    """
+    # Gate-relevant scoring caps each axis at 100. Over-counting bugs (the
+    # historical field_completeness > 100 artefact) would otherwise let a
+    # challenger game the cluster gate by inflating a single axis.
+    base = _composite_score_standalone(results, phase_key, cap_axes=True)
+
+    buckets: dict[str, list[dict]] = {}
+    for entry in results or []:
+        key = _stratum_key(entry)
+        buckets.setdefault(key, []).append(entry)
+
+    by_stratum: dict[str, dict] = {}
+    for key, rows in buckets.items():
+        sub = _composite_score_standalone(rows, phase_key, cap_axes=True)
+        sub["n"] = len(rows)
+        sub["gate_eligible"] = len(rows) >= min_sites_for_gate
+        by_stratum[key] = sub
+
+    gate_eligible = {
+        k: v for k, v in by_stratum.items() if v.get("gate_eligible")
+    }
+    if gate_eligible:
+        worst_key = min(gate_eligible, key=lambda k: gate_eligible[k]["composite"])
+        worst = {
+            "stratum": worst_key,
+            "composite": gate_eligible[worst_key]["composite"],
+            "n": gate_eligible[worst_key]["n"],
+        }
+    else:
+        worst = None
+
+    return {
+        "all": base,
+        "by_stratum": by_stratum,
+        "worst_gate_eligible": worst,
+        "n_strata_total": len(by_stratum),
+        "n_strata_gate_eligible": len(gate_eligible),
+    }
+
+
+def _cluster_gate_verdict(
+    challenger_strat: dict,
+    champion_strat: dict,
+    *,
+    tolerance: float = CLUSTER_REGRESSION_TOLERANCE,
+) -> dict:
+    """Compare stratified challenger vs champion. Blocks promotion if any
+    gate-eligible cluster has regressed by more than `tolerance` points.
+
+    Returns:
+        {
+          "passed": bool,
+          "regressions": [{stratum, champ, challenger, delta}],
+          "worst_comparison": {stratum, champ, challenger, delta} | None,
+        }
+    """
+    ch_map = challenger_strat.get("by_stratum", {}) or {}
+    cp_map = champion_strat.get("by_stratum", {}) or {}
+
+    regressions = []
+    worst_comparison = None
+    worst_delta = 0.0
+
+    for stratum, champ in cp_map.items():
+        if not champ.get("gate_eligible"):
+            continue
+        challenger = ch_map.get(stratum)
+        if not challenger:
+            # Cluster existed for champion but not for challenger — can only
+            # happen if the run includes a DIFFERENT set of sites, which we
+            # don't support. Treat as a severe regression.
+            regressions.append({
+                "stratum": stratum,
+                "champ": champ["composite"],
+                "challenger": 0.0,
+                "delta": -champ["composite"],
+                "n": champ["n"],
+            })
+            continue
+        delta = challenger["composite"] - champ["composite"]
+        if delta < worst_delta:
+            worst_delta = delta
+            worst_comparison = {
+                "stratum": stratum,
+                "champ": champ["composite"],
+                "challenger": challenger["composite"],
+                "delta": round(delta, 1),
+                "n": challenger["n"],
+            }
+        if delta < -tolerance:
+            regressions.append({
+                "stratum": stratum,
+                "champ": champ["composite"],
+                "challenger": challenger["composite"],
+                "delta": round(delta, 1),
+                "n": challenger["n"],
+            })
+
+    # Additional worst-stratum invariant: challenger's worst gate-eligible
+    # cluster must not be below champion's worst gate-eligible cluster.
+    ch_worst = challenger_strat.get("worst_gate_eligible") or {}
+    cp_worst = champion_strat.get("worst_gate_eligible") or {}
+    worst_invariant_ok = True
+    if cp_worst:
+        if not ch_worst:
+            worst_invariant_ok = False
+        elif ch_worst["composite"] < cp_worst["composite"] - tolerance:
+            worst_invariant_ok = False
+
+    return {
+        "passed": len(regressions) == 0 and worst_invariant_ok,
+        "regressions": regressions,
+        "worst_comparison": worst_comparison,
+        "worst_invariant_ok": worst_invariant_ok,
+        "champion_worst": cp_worst,
+        "challenger_worst": ch_worst,
+        "tolerance": tolerance,
     }
 
 
@@ -1263,6 +1558,7 @@ async def execute_test_run(
     # remain. Next challenger versions will add themselves via _FINDER_MAP updates
     # when their extractor + finder files are created.
     _FINDER_MAP = {
+        70: 70,  # v7.0 challenger
         69: 69,  # v6.9 champion
         60: 60,  # v6.0 consolidated reference
         20: 20, 17: 5, 16: 4, 15: 3, 14: 2, 13: 2, 12: 2,

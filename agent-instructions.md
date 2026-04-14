@@ -199,14 +199,30 @@ The Models page was cleared on 2026-04-14 and v6.9 re-instated as the sole live 
 
 **Composite = 0.20·Discovery + 0.30·QualityExtraction + 0.25·FieldCompleteness + 0.25·VolumeAccuracy**
 
-**Promotion gate** (enforced in `backend/app/tasks/ml_tasks.py`):
-- Challenger composite > 0
-- Challenger composite > champion composite (capped objective score)
-- Regression accuracy ≥ 60% on the fixed regression subset
-- **Zero regressions** — challenger must not miss any site the champion passed
-- If all four pass → challenger promoted to `status='live'`, old champion demoted to `tested`
+**Promotion gate** (enforced in `backend/app/tasks/ml_tasks.py`, redesigned 2026-04-14 — all seven conditions must pass):
 
-When auditing historical runs or comparing candidates, **always cap each axis at 100 before computing the composite**. Raw values above 100 indicate over-counting and should not be rewarded.
+1. Challenger composite > 0
+2. Challenger composite > champion composite (capped objective score)
+3. Regression accuracy ≥ 60% on the fixed regression subset
+4. **Zero regressions on sites the current champion passed** (legacy gate)
+5. **Cluster gate** — per-ATS composite (each axis capped at 100) for every stratum with ≥3 sites must not drop more than `CLUSTER_REGRESSION_TOLERANCE` (default 2.0) points vs champion. The worst gate-eligible cluster must not drop below champion's worst gate-eligible cluster. Strata with <3 sites are reported but do not block.
+6. **Ever-passed gate** — monotonic `ever_passed_sites` table (migration 0028) tracks every site any version has ever passed. Challenger must not regress any of them by more than `EVER_PASSED_REGRESSION_SLACK_PCT` (15 %) vs the best recorded jobs_quality. Closes the ratcheting-loss gap when the champion rolls forward and a transient regression becomes invisible to gate 4.
+7. **Oscillation gate** — `site_result_history` (migration 0028) tracks the last 20 pass/fail verdicts per URL. Sites flipping ≥2 times in the last 5 runs are "unstable"; the challenger must not currently be failing any of them.
+
+If all seven pass → challenger promoted to `status='live'`, old champion demoted to `tested`. The summary dict on every test run now includes `cluster_gate`, `ever_passed_regressions`, `unstable_site_failures`, and a `promotion_decision` block with per-gate reasons.
+
+**Always cap each axis at 100 before computing the composite.** Raw values above 100 indicate over-counting and should not be rewarded. The stratified scorer (`_composite_score_stratified`) always caps; the legacy `_composite_score_standalone` caps only when called with `cap_axes=True` (preserves historical comparability for the unchanged "all" scorecard).
+
+### Universality-First Auto-Improve (landed 2026-04-14)
+
+The auto-improve loop used to regress-cycle: fix Workday → break SuccessFactors → fix SuccessFactors → break Workday. The redesign shifts the optimisation target from "improve aggregate composite" to "improve composite without regressing any cluster we've ever passed". Four layered changes, all shipped together:
+
+- **L1 — Stratified scoring + cluster gate.** [`_composite_score_stratified`](backend/app/api/v1/endpoints/ml_models.py#L857) buckets results by ATS (`greenhouse`, `workday`, `oracle_cx`, structural fallbacks `spa_shell`/`generic_cms`/`bespoke`). [`_cluster_gate_verdict`](backend/app/api/v1/endpoints/ml_models.py#L930) enforces the per-cluster promotion rule described above.
+- **L2 — Ever-passed ratchet.** [`ever_passed_sites`](backend/alembic/versions/0028_universality_gate.py) is a monotonic (url → best-composite, best-version) mapping. The aggregator upserts it after every promoted run; the promotion gate reads it to refuse challengers that silently lose ground relative to historical highs, regardless of what the current champion did.
+- **L3 — Pattern-card prompt.** [`backend/scripts/auto_improve.py`](backend/scripts/auto_improve.py) now leads the Codex brief with anonymised pattern cards for every ≥3-site cluster; named per-site drill-down only remains for 1-2-site long-tail clusters. Stops the prompt from biasing Codex toward narrow fixes for specific named domains.
+- **L4 — Oscillation detector.** [`backend/app/ml/champion_challenger/stability.py`](backend/app/ml/champion_challenger/stability.py) records per-site verdicts in `site_result_history` and computes flip counts. Sites that flip ≥2× in the last 5 runs are "unstable" and block any challenger currently failing them.
+
+Observability: [`GET /api/v1/ml-models/{id}/stratum-report`](backend/app/api/v1/endpoints/ml_models.py#L780) returns the full stratified scorecard + gate verdicts for any test run, for future Models-page UI. Backfill: [`backend/scripts/backfill_ever_passed.py`](backend/scripts/backfill_ever_passed.py) replays every completed run into both new tables — run once after migration 0028 applies.
 
 ### Champion/Challenger Infrastructure (landed 2026-04-14)
 

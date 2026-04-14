@@ -537,6 +537,7 @@ def _pick_finder(name: str):
     """
     import importlib, re
     _FINDER_MAP = {
+        70: 70,  # v7.0 challenger
         69: 69,  # v6.9 champion
         60: 60,  # v6.0 consolidated
         26: 26,  # v2.6 stable
@@ -554,6 +555,85 @@ def _pick_finder(name: str):
             pass
     from app.crawlers.career_page_finder import CareerPageFinder
     return CareerPageFinder
+
+
+# ── ATS detection for stratified scoring ─────────────────────────────────────
+# Kept in sync with `_stratum_key` in app/api/v1/endpoints/ml_models.py and
+# `_derive_ats` in app/ml/champion_challenger/failure_analysis.py. Three call
+# sites, one canonical mapping — adding a platform means updating all three.
+_ATS_NEEDLES = (
+    ("greenhouse", "greenhouse"),
+    ("lever.co", "lever"),
+    ("ashby", "ashby"),
+    ("workday", "workday"),
+    ("myworkdayjobs", "workday"),
+    ("bamboohr", "bamboohr"),
+    ("smartrecruiters", "smartrecruiters"),
+    ("icims", "icims"),
+    ("taleo", "taleo"),
+    ("successfactors", "successfactors"),
+    ("jobvite", "jobvite"),
+    ("breezy", "breezyhr"),
+    ("rippling", "rippling"),
+    ("oracle", "oracle_cx"),
+    ("salesforce", "salesforce"),
+    ("martianlogic", "martianlogic"),
+    ("pageup", "pageup"),
+    ("recruitee", "recruitee"),
+    ("teamtailor", "teamtailor"),
+    ("applyflow", "applyflow"),
+    ("jobs2web", "jobs2web"),
+)
+
+
+def _detect_entry_ats(url: str, known: dict | None) -> str | None:
+    """Best-effort ATS tag from the pre-run signals we have.
+
+    Cheap path only — no HTTP. Called at entry construction in test_single_site
+    before any discovery runs. Prefers an explicit `atsName` on the baseline
+    wrapper, then falls back to substring matching on the URL + wrapper JSON.
+    Returns None when we genuinely can't tell; the aggregator will refine using
+    the discovered URL/tier after the model phase runs.
+    """
+    if isinstance(known, dict):
+        explicit = known.get("atsName") or known.get("ats_name") or known.get("ats")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip().lower().replace(" ", "_")
+
+    import json as _j
+    wrapper_blob = _j.dumps(known or {})[:400].lower() if known else ""
+    hay = f"{(url or '').lower()} {wrapper_blob}"
+    for needle, label in _ATS_NEEDLES:
+        if needle in hay:
+            return label
+    return None
+
+
+def _refine_entry_ats(entry: dict) -> str | None:
+    """Second-pass ATS detection using post-discovery signals.
+
+    Called by the aggregator after every site test has completed. Uses the
+    discovered URL, discovery method, and tier label that the extractor
+    reported — signals that weren't available at entry-construction time.
+    """
+    existing = (entry.get("ats_platform") or "").strip().lower()
+    if existing and existing not in ("none", "null", "unknown"):
+        return existing
+    model = entry.get("model") or {}
+    url_found = (model.get("url_found") or entry.get("url") or "").lower()
+    disc = (model.get("discovery_method") or "").lower()
+    tier = (model.get("tier_used") or "").lower()
+    hay = f"{url_found} {disc} {tier}"
+    for needle, label in _ATS_NEEDLES:
+        if needle in hay:
+            return label
+    # Structural fallback — shape of the page determines the bucket when no
+    # platform detection matches. Kept coarse on purpose.
+    if any(k in hay for k in ("__next_data__", "_next/data", "nuxt", "react-root")):
+        return "spa_shell"
+    if any(k in hay for k in ("wordpress", "elementor", "drupal", "joomla")):
+        return "generic_cms"
+    return "bespoke"
 
 
 @celery_app.task(
@@ -672,6 +752,7 @@ async def _run_site(site_data: list, model_name: str, champion_name: str | None,
         "url": url,
         "domain": domain,
         "company": company_name,
+        "ats_platform": _detect_entry_ats(url, known),
         "http_ok": False,
         "baseline": {
             "jobs": 0, "fields": {}, "sample_titles": [],
@@ -1032,10 +1113,23 @@ async def _aggregate(
     from sqlalchemy import select
     from app.db.base import AsyncSessionLocal
     from app.models.ml_model import MLModel, MLModelTestRun
-    from app.api.v1.endpoints.ml_models import _composite_score_standalone
+    from app.api.v1.endpoints.ml_models import (
+        _composite_score_standalone,
+        _composite_score_stratified,
+        _cluster_gate_verdict,
+    )
+    from app.ml.champion_challenger import stability
 
     _run_id = _UUID(run_id)
     _model_id = _UUID(model_id)
+
+    # Refine ats_platform using post-discovery signals — many entries were
+    # tagged as None at test_single_site time because we hadn't fetched the
+    # page yet. This is the one place we have all the evidence to bucket them.
+    for entry in site_results:
+        refined = _refine_entry_ats(entry)
+        if refined:
+            entry["ats_platform"] = refined
 
     def _phase_stats(results):
         match_counts = Counter(e["match"] for e in results)
@@ -1093,13 +1187,25 @@ async def _aggregate(
                 "field_completeness": 0, "volume_accuracy": 0,
             }
 
+            # Stratified scorecards — per-ATS composites feed the cluster gate.
+            ch_strat = _composite_score_stratified(site_results, "model")
+            champ_strat = (
+                _composite_score_stratified(site_results, "champion")
+                if champion_name else {"all": champ_scores, "by_stratum": {},
+                                         "worst_gate_eligible": None,
+                                         "n_strata_total": 0,
+                                         "n_strata_gate_eligible": 0}
+            )
+
             summary["challenger_composite"] = ch_scores
             summary["champion_composite"] = champ_scores
+            summary["challenger_stratified"] = ch_strat
+            summary["champion_stratified"] = champ_strat
 
             reg_stats = summary.get("regression")
             reg_acc = reg_stats["accuracy"] if reg_stats else summary["accuracy"]
 
-            # Regression gate: challenger must pass all sites champion passed
+            # ─── Gate 1: legacy regression gate (current-champion passes) ─────
             champ_passed_urls = set()
             challenger_missed = set()
             if champion_name:
@@ -1109,10 +1215,8 @@ async def _aggregate(
                     champ_quality = champ_data.get("jobs_quality", champ_data.get("jobs", 0))
                     model_quality = model_data.get("jobs_quality", model_data.get("jobs", 0))
                     baseline_jobs = sr.get("baseline", {}).get("jobs", 0)
-                    # Champion "passed" = got >=90% of baseline
                     if baseline_jobs > 0 and champ_quality >= baseline_jobs * 0.9:
                         champ_passed_urls.add(sr["url"])
-                        # Check if challenger also passed this site
                         if model_quality < baseline_jobs * 0.9:
                             challenger_missed.add(sr.get("company", sr["url"]))
 
@@ -1121,12 +1225,85 @@ async def _aggregate(
                 logger.warning("Regression: challenger missed %d sites champion passed: %s",
                                len(challenger_missed), ", ".join(list(challenger_missed)[:5]))
 
+            # ─── Gate 2: per-stratum cluster gate ─────────────────────────────
+            cluster_verdict = _cluster_gate_verdict(ch_strat, champ_strat)
+            summary["cluster_gate"] = cluster_verdict
+            if not cluster_verdict["passed"]:
+                regs = cluster_verdict["regressions"]
+                logger.warning(
+                    "Cluster gate FAIL — %d strata regressed: %s",
+                    len(regs),
+                    ", ".join(
+                        f"{r['stratum']}({r['champ']:.1f}→{r['challenger']:.1f}, "
+                        f"n={r['n']})" for r in regs[:5]
+                    ),
+                )
+
+            # ─── Gate 3: ever-passed regression gate ──────────────────────────
+            ever_regressions = await stability.fetch_ever_passed_regressions(
+                db, site_results=site_results,
+            )
+            summary["ever_passed_regressions"] = [
+                {"url": r["url"], "company": r["company"],
+                 "ats_platform": r["ats_platform"],
+                 "prev_version": r["prev_best_version"],
+                 "prev_jobs_quality": r["prev_jobs_quality"],
+                 "cur_jobs_quality": r["cur_jobs_quality"]}
+                for r in ever_regressions
+            ]
+            ever_passed_ok = len(ever_regressions) == 0
+            if ever_regressions:
+                logger.warning(
+                    "Ever-passed gate FAIL — challenger regressed %d sites some version had previously passed: %s",
+                    len(ever_regressions),
+                    ", ".join(r["company"] or r["url"] for r in ever_regressions[:5]),
+                )
+
+            # ─── Gate 4: oscillation detector ─────────────────────────────────
+            # Sites that have flipped pass/fail ≥2 times in the last 5 runs are
+            # 'unstable'. Block promotion if the challenger is *currently
+            # failing* any of these — it's very likely about to cause the next
+            # cycle of the oscillation loop.
+            all_urls = [s.get("url") for s in site_results if s.get("url")]
+            unstable = await stability.unstable_site_urls(db, urls=all_urls)
+            oscillating_failures: list[str] = []
+            for sr in site_results:
+                url = sr.get("url") or ""
+                if url in unstable and (sr.get("match") or "") not in (
+                    "model_equal_or_better", "model_only"
+                ):
+                    oscillating_failures.append(sr.get("company") or url)
+            summary["unstable_site_failures"] = oscillating_failures
+            oscillation_ok = len(oscillating_failures) == 0
+            if oscillating_failures:
+                logger.warning(
+                    "Oscillation gate FAIL — challenger failing %d unstable sites: %s",
+                    len(oscillating_failures),
+                    ", ".join(oscillating_failures[:5]),
+                )
+
             should_promote = (
                 ch_scores["composite"] > 0
                 and reg_acc >= 0.60
                 and ch_scores["composite"] > champ_scores["composite"]
-                and regression_ok  # Must not regress on any champion-passing site
+                and regression_ok
+                and cluster_verdict["passed"]
+                and ever_passed_ok
+                and oscillation_ok
             )
+
+            summary["promotion_decision"] = {
+                "promote": should_promote,
+                "reasons": {
+                    "composite_positive": ch_scores["composite"] > 0,
+                    "regression_accuracy_ok": reg_acc >= 0.60,
+                    "beats_champion": ch_scores["composite"] > champ_scores["composite"],
+                    "no_champion_regressions": regression_ok,
+                    "cluster_gate_ok": cluster_verdict["passed"],
+                    "ever_passed_gate_ok": ever_passed_ok,
+                    "oscillation_gate_ok": oscillation_ok,
+                },
+            }
 
             if should_promote:
                 old_live = list(await db.scalars(
@@ -1135,11 +1312,44 @@ async def _aggregate(
                 for old in old_live:
                     old.status = "tested"
                 model.status = "live"
-                logger.info("Auto-promoted %s to live (%.1f > %.1f)", model.name, ch_scores["composite"], champ_scores["composite"])
+                logger.info(
+                    "Auto-promoted %s to live (%.1f > %.1f, %d strata ok, ever-passed ok)",
+                    model.name, ch_scores["composite"], champ_scores["composite"],
+                    ch_strat["n_strata_gate_eligible"],
+                )
             else:
-                logger.info("Did NOT promote %s (%.1f vs %.1f, reg=%.2f)", model.name, ch_scores["composite"], champ_scores["composite"], reg_acc)
+                logger.info(
+                    "Did NOT promote %s (%.1f vs %.1f, reg=%.2f, cluster=%s, ever=%s, osc=%s)",
+                    model.name, ch_scores["composite"], champ_scores["composite"],
+                    reg_acc, cluster_verdict["passed"], ever_passed_ok, oscillation_ok,
+                )
 
             run.results_detail = {"sites": site_results, "summary": summary}
+
+            # Universality infrastructure: record history, ratchet ever-passed
+            # set. Done regardless of promotion decision — we learn from every
+            # run.
+            try:
+                await stability.record_run_history(
+                    db,
+                    run_id=_run_id,
+                    model_id=_model_id,
+                    model_name=model_name,
+                    site_results=site_results,
+                )
+                if should_promote or not champion_name:
+                    # Only ratchet the ever-passed set when the challenger is
+                    # validated (promoted) OR this is a first-run champion.
+                    # Otherwise we'd pollute the set with unvalidated wins.
+                    await stability.upsert_ever_passed(
+                        db,
+                        run_id=_run_id,
+                        model_name=model_name,
+                        site_results=site_results,
+                    )
+            except Exception as stab_err:  # noqa: BLE001 — advisory persistence
+                logger.warning("stability persistence failed: %s", stab_err)
+
             await db.commit()
 
             if (run.test_config or {}).get("auto_improve", auto_improve):

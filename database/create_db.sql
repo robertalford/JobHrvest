@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict KqOg9IswEAkcp8BZCJbqlerDcbuPbukgS5aCcHBDhoGboiZQ9rkeS2fgdT7mGz1
+\restrict 2A9AHvRfRSK8GVxyJGcgbt79ndTB4zVJq0iprAk9h0KonxwDFdQtHxVu6yb8Lhe
 
 -- Dumped from database version 16.13
 -- Dumped by pg_dump version 16.13
@@ -411,6 +411,25 @@ CREATE TABLE public.drift_baselines (
     sample_size integer NOT NULL,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
     is_active boolean DEFAULT true NOT NULL
+);
+
+
+--
+-- Name: ever_passed_sites; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ever_passed_sites (
+    url text NOT NULL,
+    company text,
+    ats_platform text,
+    best_composite double precision NOT NULL,
+    best_version_name text NOT NULL,
+    best_run_id uuid,
+    jobs_quality integer DEFAULT 0 NOT NULL,
+    baseline_jobs integer DEFAULT 0 NOT NULL,
+    first_passed_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -939,6 +958,46 @@ CREATE TABLE public.run_queue (
 
 
 --
+-- Name: site_result_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.site_result_history (
+    id bigint NOT NULL,
+    url text NOT NULL,
+    run_id uuid NOT NULL,
+    model_id uuid,
+    model_name text,
+    ats_platform text,
+    match text NOT NULL,
+    passed boolean NOT NULL,
+    baseline_jobs integer DEFAULT 0 NOT NULL,
+    model_jobs integer DEFAULT 0 NOT NULL,
+    jobs_quality integer DEFAULT 0 NOT NULL,
+    composite_pts double precision,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: site_result_history_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.site_result_history_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: site_result_history_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.site_result_history_id_seq OWNED BY public.site_result_history.id;
+
+
+--
 -- Name: site_templates; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1008,6 +1067,13 @@ CREATE TABLE public.word_filters (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: site_result_history id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.site_result_history ALTER COLUMN id SET DEFAULT nextval('public.site_result_history_id_seq'::regclass);
 
 
 --
@@ -1128,6 +1194,14 @@ ALTER TABLE ONLY public.drift_baselines
 
 ALTER TABLE ONLY public.drift_baselines
     ADD CONSTRAINT drift_baselines_uk UNIQUE (model_name, feature_name, window_end);
+
+
+--
+-- Name: ever_passed_sites ever_passed_sites_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ever_passed_sites
+    ADD CONSTRAINT ever_passed_sites_pkey PRIMARY KEY (url);
 
 
 --
@@ -1384,6 +1458,14 @@ ALTER TABLE ONLY public.review_feedback
 
 ALTER TABLE ONLY public.run_queue
     ADD CONSTRAINT run_queue_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: site_result_history site_result_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.site_result_history
+    ADD CONSTRAINT site_result_history_pkey PRIMARY KEY (id);
 
 
 --
@@ -1708,6 +1790,20 @@ CREATE INDEX ix_drift_baselines_active ON public.drift_baselines USING btree (mo
 
 
 --
+-- Name: ix_ever_passed_sites_ats; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_ever_passed_sites_ats ON public.ever_passed_sites USING btree (ats_platform);
+
+
+--
+-- Name: ix_ever_passed_sites_last_seen; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_ever_passed_sites_last_seen ON public.ever_passed_sites USING btree (last_seen_at DESC);
+
+
+--
 -- Name: ix_excluded_sites_domain; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2006,6 +2102,20 @@ CREATE INDEX ix_run_queue_drain ON public.run_queue USING btree (queue_type, pri
 --
 
 CREATE UNIQUE INDEX ix_run_queue_unique_pending ON public.run_queue USING btree (queue_type, item_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: ix_site_result_history_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_site_result_history_run ON public.site_result_history USING btree (run_id);
+
+
+--
+-- Name: ix_site_result_history_url_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_site_result_history_url_time ON public.site_result_history USING btree (url, observed_at DESC);
 
 
 --
@@ -2351,5 +2461,5 @@ ALTER TABLE ONLY public.site_templates
 -- PostgreSQL database dump complete
 --
 
-\unrestrict KqOg9IswEAkcp8BZCJbqlerDcbuPbukgS5aCcHBDhoGboiZQ9rkeS2fgdT7mGz1
+\unrestrict 2A9AHvRfRSK8GVxyJGcgbt79ndTB4zVJq0iprAk9h0KonxwDFdQtHxVu6yb8Lhe
 

@@ -528,11 +528,98 @@ Other candidates in this cycle may pursue different focuses — pick the most
 impactful single change under this directive and resist scope creep.
 """
 
-    # Build dynamic failure details. Baseline selectors are inlined as compact
-    # JSON so Codex sees the exact wrapper keys that would have solved the case
-    # without opening a side-file.
+    # Build dynamic failure details.
+    #
+    # UNIVERSALITY-FIRST REDESIGN (2026-04-14): surfacing named per-site failures
+    # was training Codex to write narrow fixes ("fix example.com"). The prompt
+    # now leads with PATTERN CARDS — an anonymised summary of every cluster
+    # with ≥3 failing sites — and only drills down to named per-site examples
+    # for small clusters (1–2 sites) where platform generalisation isn't
+    # possible yet.
+    #
+    # The goal: a fix must help a pattern, not a domain. When Codex writes a
+    # change, the promotion gate (ml_tasks._aggregate) blocks it if any ATS
+    # cluster regresses by ≥2 points OR any ever-passed site is lost OR an
+    # oscillating site is newly failing. The prompt must therefore frame each
+    # failure as evidence of a pattern, not as a URL to fix.
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(PROJECT_DIR), "backend"))
+        from app.ml.champion_challenger.failure_analysis import (  # type: ignore
+            cluster_failures_by_ats,
+        )
+    except Exception:  # noqa: BLE001
+        def cluster_failures_by_ats(entries):  # type: ignore
+            buckets: dict[str, list[dict]] = {}
+            for e in entries or []:
+                buckets.setdefault(
+                    (e.get("ats_platform") or e.get("_ats") or "unknown").lower(),
+                    [],
+                ).append(e)
+            return dict(sorted(buckets.items(), key=lambda kv: -len(kv[1])))
+
+    improvement_targets = list(analysis.get("failures") or []) + list(analysis.get("gaps") or [])
+    clusters = cluster_failures_by_ats(improvement_targets)
+
+    # Pattern cards for every cluster with ≥3 failing sites. These are the
+    # only high-signal buckets; small clusters get per-site drill-down below.
+    CLUSTER_MIN_FOR_CARD = 3
+    cards_text = ""
+    card_num = 0
+    for ats_label, entries in clusters.items():
+        if len(entries) < CLUSTER_MIN_FOR_CARD:
+            continue
+        card_num += 1
+        # Shared baseline selector hint: the first entry with a wrapper wins.
+        hint = {}
+        for e in entries:
+            h = _compact_baseline_selectors(e)
+            if h:
+                hint = h
+                break
+        hint_json = json.dumps(hint, ensure_ascii=False) if hint else "{}"
+        if len(hint_json) > 900:
+            hint_json = hint_json[:897] + "..."
+
+        # Aggregate volume signal for the cluster — shows whether the cluster
+        # is dominated by hard failures (model=0) vs partials.
+        total_b = sum(int(e.get("baseline_jobs") or 0) for e in entries)
+        total_m = sum(int(e.get("model_jobs_quality") or e.get("model_jobs") or 0) for e in entries)
+        vr = (total_m / total_b) if total_b else 0.0
+        hard_fails = sum(1 for e in entries if (e.get("model_jobs") or 0) == 0)
+
+        # Example HTML files — use up to 2, anonymised by slug. Codex gets
+        # filesystem paths, not company names or URLs.
+        example_files = []
+        for e in entries[:2]:
+            for key in ("html_file", "baseline_html_file", "detail_html_file"):
+                fp = e.get(key)
+                if fp:
+                    example_files.append(f"  - {os.path.basename(fp)}  ({key})")
+                    break
+        examples_block = "\n".join(example_files) if example_files else "  (no HTML captured)"
+
+        cards_text += f"""
+--- Pattern Card {card_num}: ATS = {ats_label} ({len(entries)} sites) ---
+Aggregate: baseline={total_b} jobs, model={total_m} jobs ({vr:.0%}), hard-failures={hard_fails}
+Shared baseline wrapper hint: {hint_json}
+Sample HTML files (anonymised, in {context_dir}):
+{examples_block}
+
+Your fix for this pattern must help ≥{CLUSTER_MIN_FOR_CARD} of these {len(entries)} sites
+without regressing any OTHER cluster (promotion gate blocks cluster drops >2 pts).
+"""
+
+    # Single/pair clusters — show per-site because cluster generalisation isn't
+    # possible yet. Capped at MAX_FAILURES_IN_PROMPT total entries so the prompt
+    # stays within its byte budget.
+    small_cluster_entries: list[dict] = []
+    for ats_label, entries in clusters.items():
+        if len(entries) < CLUSTER_MIN_FOR_CARD:
+            small_cluster_entries.extend(entries)
+    small_cluster_entries = small_cluster_entries[:MAX_FAILURES_IN_PROMPT]
+
     failures_text = ""
-    for i, f in enumerate(analysis["failures"]):
+    for i, f in enumerate(small_cluster_entries):
         hint = _compact_baseline_selectors(f)
         hint_json = json.dumps(hint, ensure_ascii=False) if hint else "{}"
         if len(hint_json) > 900:
@@ -544,26 +631,24 @@ impactful single change under this directive and resist scope creep.
                 f"\n  Detail HTML saved to:            {f.get('detail_html_file')}"
             )
         failures_text += f"""
---- Failure {i+1}: {f['match']} ---
-Company: {f['company']}
-Domain: {f['domain']}  |  ATS: {f.get('_ats', f.get('ats_platform','?'))}
-Test URL (known from test data): {f['test_url']}
-Baseline: {f['baseline_jobs']} jobs | Titles: {f['baseline_titles']}
-  Baseline wrapper hint (COMPACT): {hint_json}
-Model: {f['model_jobs']} jobs ({f.get('volume_ratio', 0):.0%} of baseline) | Tier: {f['model_tier']} | Titles: {f['model_titles']}
-  Discovery: {f['model_discovery']} → {f['model_url_found']}
-  Error: {f['model_error']}{detail_ref}
+--- Long-tail {i+1}: ATS={f.get('_ats', f.get('ats_platform','?'))} ---
+Match: {f['match']}  |  Baseline: {f['baseline_jobs']} jobs  |  Model: {f['model_jobs']} jobs ({f.get('volume_ratio', 0):.0%})
+Baseline wrapper hint: {hint_json}
+Tier: {f['model_tier']}  |  Discovery: {f['model_discovery']} → {f['model_url_found']}
+Error: {f['model_error']}{detail_ref}
 Context files (READ THESE for full analysis):
   HTML (model's discovered page): {f.get('html_file', 'N/A')}
   HTML (baseline's test URL):     {f.get('baseline_html_file', 'same as above')}
   Full wrapper config (JSON):     {f.get('wrapper_file', 'N/A')}
+  Company: {f['company']}  |  Domain: {f['domain']}  (use for reference only)
 """
 
     # Build gap details (partial matches — model found some jobs but not all).
-    # Same compact-hint treatment as failures, plus side-by-side descriptions
-    # which are the highest-value signal for gaps.
+    # These are kept in aggregate form — the cluster cards above already list
+    # gaps alongside failures, and repeating them inflates prompt size.
     gaps_text = ""
-    for i, g in enumerate(analysis.get("gaps", [])):
+    # Preserved for reference / byte-budget compatibility with downstream regex:
+    for i, g in enumerate(list(analysis.get("gaps", []))[:0]):  # intentionally empty
         desc_comparison = ""
         b_desc = g.get("baseline_sample_desc", "").strip()
         m_desc = g.get("model_sample_desc", "").strip()
@@ -784,16 +869,31 @@ Even if the model finds SOME jobs on every site, there is still work to do if:
 - Quality < baseline quality (missing fields, bad titles)
 - Any "partial" matches exist (model extracts fewer jobs than baseline)
 
-### Failures ({analysis['fail_count']} sites — model_worse + model_failed)
+### Pattern Cards — clusters with ≥3 failing/partial sites (fix THESE first)
 
-{failures_text if failures_text.strip() else "No hard failures. Focus on gaps below."}
+Every card below is a pattern across multiple sites. The promotion gate **will
+block** any change that regresses an existing passing cluster by more than
+2 composite points, or that loses a site some earlier version had already
+passed (ever-passed gate), or that fails a site currently flagged as
+oscillating. Optimise for the pattern, not the site.
 
-### Volume/Quality Gaps ({analysis.get('gap_count', 0)} sites — partial matches or quality gaps)
+{cards_text if cards_text.strip() else "No failing clusters of ≥3 sites — the remaining long-tail is below."}
 
-These sites are NOT failures but the model is capturing fewer jobs or lower quality
-than the baseline. These represent the biggest opportunity for improvement.
+### Long-tail — single/paired failures (analyse for root cause, not selectors)
 
-{gaps_text if gaps_text.strip() else "No gaps detected."}
+These sites each represent a platform with only 1–2 failing instances today.
+They are NOT promotion-blocking on their own (cluster gate requires ≥3 sites)
+but they're a seedbed for tomorrow's clusters. Look for SHARED root causes.
+
+{failures_text if failures_text.strip() else "No long-tail failures this run."}
+
+### Volume/Quality Gaps
+
+Partial matches are folded into the pattern cards above — extracted alongside
+hard failures since both represent the same underlying pattern gap. Per-site
+drill-down for gaps that don't fit a ≥3-site cluster:
+
+{gaps_text if gaps_text.strip() else "No un-clustered gaps."}
 
 ### Spot-Check Successes
 

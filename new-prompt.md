@@ -19,7 +19,14 @@ The single yardstick for promotion is the **4-axis composite** (see CURRENT CHAM
 | Field Completeness | 25% | Avg fields/job out of 6 (title, source_url, location_raw, salary_raw, employment_type, description) | 100 |
 | Volume Accuracy | 25% | Ratio of model job count to baseline (peaks at 1.0, penalty when >1.5) | 100 |
 
-Promotion requires: composite > champion + ≥60% regression accuracy + **zero regressions** on sites the champion passed.
+Promotion requires **all four** gates to pass — a single-metric win never promotes:
+
+1. **Global composite > champion composite** and **≥60% regression accuracy**.
+2. **Cluster gate** — per-ATS composite, for every cluster with ≥3 sites, must not drop more than 2.0 points vs champion. Worst-gate-eligible-cluster composite must not regress. *Enforced in `backend/app/tasks/ml_tasks.py` `_aggregate`.*
+3. **Ever-passed gate** — monotonic set of every site any version has previously passed. Challenger must still pass them (±15 % volume slack). Closes the ratcheting-loss gap when the champion rolls forward. *Enforced against `ever_passed_sites` table.*
+4. **Oscillation gate** — sites that have flipped pass/fail ≥2 times in the last 5 runs are "unstable". Challenger must not be failing any of them. *Enforced from `site_result_history` via `app.ml.champion_challenger.stability`.*
+
+Layered against the three legacy gates, **fixes that help one ATS by breaking another will not pass.** Your change must generalise across every gate-eligible cluster, not just the one highlighted in the brief.
 
 ---
 
@@ -42,9 +49,11 @@ Old iteration files from before the 2026-04-14 reset are archived under `backend
 
 ---
 
-## Three Data Signals per Site (Baseline / Champion / Challenger)
+## Pattern Cards, not per-site examples (universality-first brief)
 
-Each A/B test runs three extractions per site:
+The per-iteration brief now leads with **pattern cards** — one card per cluster of ≥3 failing/partial sites. Each card shows the ATS, the aggregate baseline vs model volume, a shared baseline wrapper hint, and anonymised HTML filenames. The per-site identity (company name, domain, test URL) is intentionally de-emphasised — we noticed the previous prompt biased Codex toward narrow fixes for the specific named domains.
+
+Three extractions still run per site:
 
 - **Baseline** — Jobstream hand-tuned selectors on the live HTML. The ceiling.
 - **Champion** — current live model extracting blindly. The floor your change must beat.
@@ -59,7 +68,7 @@ The `results_detail.sites` payload contains the per-phase extractions plus `base
 | "Baseline gets location from detail pages on 30 sites → add general detail enrichment" | "salary is in `span.comp-range` on one site → add that selector" |
 | "JSON-LD parser misses nested arrays on 8 sites → fix the parser" | "Fix helps 3 sites, could break 5 → ship it anyway" |
 
-**Every change must help 3+ sites.** Site-specific fixes are banned.
+**Every change must help 3+ sites.** The cluster gate now enforces this — a change that targets a ≤2-site cluster cannot clear the gate on its own. Long-tail (1–2 site) failures are shown in the prompt for root-cause analysis but are not promotion-blocking until they cluster to 3.
 
 ---
 
