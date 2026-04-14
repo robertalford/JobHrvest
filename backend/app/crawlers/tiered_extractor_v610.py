@@ -26,6 +26,7 @@ _V610_CTA_TITLE = re.compile(
     r"(?:(?:all|our|open)\s+){0,2}(?:jobs?|vacanc(?:y|ies)|openings?|positions?)\b",
     re.IGNORECASE,
 )
+_V610_TAXONOMY_HEADING = re.compile(r"^[A-Za-z][A-Za-z\\s,&|/-]{3,}$")
 _V610_NON_ROLE_TITLES = {
     "start",
     "browse jobs",
@@ -39,6 +40,8 @@ _V610_NON_ROLE_TITLES = {
     "open positions",
     "explore jobs",
     "explore jobs for all locations",
+    "diversity, equity & inclusion",
+    "diversity, equity and inclusion",
 }
 _V610_MAX_FALLBACK_ADDITIONS = 8
 _V610_MAX_FALLBACK_ADDITIONS_WITH_GAP = 12
@@ -66,6 +69,10 @@ def _is_non_role_title_v610(title: str) -> bool:
         return True
     if _V610_CTA_TITLE.match(normalized):
         return True
+    if _V610_TAXONOMY_HEADING.match(normalized) and not _title_has_job_noun(normalized):
+        words = re.findall(r"[A-Za-z]{3,}", normalized)
+        if 2 <= len(words) <= 6 and any(token in normalized for token in (",", "&", "|")):
+            return True
     return False
 
 

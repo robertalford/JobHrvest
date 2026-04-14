@@ -42,6 +42,7 @@
     "Oracle CandidateExperience hosts that expose multiple tenant site IDs can look equally valid in HTML shells; discovery tie-breaks may lock onto generic CX paths unless tenant-sp..."
   ],
   "what_works_well": [
+    "Rejecting taxonomy-only headings (e.g. 'Diversity, Equity & Inclusion') while retaining role titles with explicit job nouns reduces Type-1 false positives on prose-heavy careers pages.",
     "Post-extraction exact-title filtering for pagination/section labels (for example `Show N more`, `Working with us`) removes Type-1 noise with minimal volume risk when paired with URL checks like `/show_more`.",
     "Role-gated Elementor card extraction with link evidence recovers multilingual lowongan-style job grids while rejecting section headings.",
     "Hidden-input (`job_title_*`) harvesting plus accordion/button context recovers card-based same-page ATS listings without requiring detail URLs.",
@@ -66,6 +67,7 @@
     "Coverage-gap fallback merging (primary under-captures, fallback has richer same-page rows with location/type metadata) can recover real volume without loosening global title validation."
   ],
   "what_doesnt_work": [
+    "Allowing team/taxonomy labels without role nouns to pass title validation inflates false positives on bespoke CMS job-search shells.",
     "Leaving listing pagination anchors (`/show_more`, `Show N more`) in final jobsets leaks obvious non-job titles and degrades precision.",
     "Site-specific hacks (Teamtailor-specific, SuccessFactors-specific, etc.) \u2014 don't generalise",
     "Deep inheritance chains (>3 levels) \u2014 become fragile and break parent logic",
