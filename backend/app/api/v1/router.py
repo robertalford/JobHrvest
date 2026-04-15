@@ -7,6 +7,7 @@ from app.api.v1.endpoints import (
     lead_imports, settings as settings_endpoints, excluded_sites, review,
     discovery_sources, geocoder, domain_imports,
     bulk_domain_process, test_data, ml_models, gold_holdout,
+    company_enrichment,
 )
 from app.api.v1.endpoints.auth import router as auth_router, get_current_user
 
@@ -35,3 +36,4 @@ api_router.include_router(bulk_domain_process.router, prefix="/bulk-domain-proce
 api_router.include_router(test_data.router,          prefix="/test-data",         tags=["test-data"],         dependencies=_auth)
 api_router.include_router(ml_models.router,          prefix="/ml-models",         tags=["ml-models"],         dependencies=_auth)
 api_router.include_router(gold_holdout.router,       prefix="/gold-holdout",      tags=["gold-holdout"],      dependencies=_auth)
+api_router.include_router(company_enrichment.router, prefix="/company-enrichment", tags=["company-enrichment"], dependencies=_auth)

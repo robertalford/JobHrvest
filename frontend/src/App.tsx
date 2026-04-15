@@ -31,6 +31,8 @@ import { Geocoder } from './components/pages/Geocoder';
 import { Models } from './components/pages/Models';
 import { TestData } from './components/pages/TestData';
 import { BulkDomainProcessor } from './components/pages/BulkDomainProcessor';
+import { PerplexityPlaceholder } from './components/pages/PerplexityPlaceholder';
+import { PerplexityV2 } from './components/pages/PerplexityV2';
 
 // In dev mode: disable all caching so every navigation fetches fresh data.
 // Set VITE_CACHE_BUST=false in .env to restore normal caching for production.
@@ -111,6 +113,19 @@ export default function App() {
             <Route path="/discovery/geocoder"         element={<SectionGate id="discovery"><Geocoder /></SectionGate>} />
 
             {/* Global — always available regardless of section */}
+            <Route
+              path="/perplexity-v2"
+              element={<PerplexityV2 />}
+            />
+            <Route
+              path="/perplexity-v3"
+              element={
+                <PerplexityPlaceholder
+                  title="Perplexity v3"
+                  description="This is a placeholder for Perplexity v3, focused on improving the current Perplexity script and prompt with additional features."
+                />
+              }
+            />
             <Route path="/how-to"   element={<HowTo />} />
             <Route path="/settings" element={<Settings />} />
 

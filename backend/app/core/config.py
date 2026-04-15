@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     APP_USERNAME: str = "admin"
     APP_PASSWORD_HASH: str = ""  # bcrypt hash — set via .env
 
+    # Company enrichment Codex worker
+    CODEX_MODEL: str = "gpt-5.3-codex"
+    COMPANY_ENRICHMENT_WORKER_STATUS_FILE: str = "/storage/company_enrichment/worker_status.json"
+    COMPANY_ENRICHMENT_CODEX_TIMEOUT_SEC: int = 120
+    COMPANY_ENRICHMENT_PAGE_FETCH_TIMEOUT_SEC: int = 20
+    COMPANY_ENRICHMENT_WORKER_STALE_AFTER_SEC: int = 90
+    COMPANY_ENRICHMENT_ROW_STALE_AFTER_SEC: int = 300
+    COMPANY_ENRICHMENT_GLOBAL_MAX_CONCURRENCY: int = 3
+    COMPANY_ENRICHMENT_PER_RUN_MAX_CONCURRENCY: int = 2
+    COMPANY_ENRICHMENT_FETCH_MAX_CONCURRENCY: int = 6
+    COMPANY_ENRICHMENT_MAX_INFLIGHT_ROWS: int = 6
+    COMPANY_ENRICHMENT_WORKER_PROCESSES: int = 1
+    COMPANY_ENRICHMENT_CACHE_TTL_HOURS: int = 168
+
     # Cors
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:80", "https://jobharvet.alfords.xyz"]
 

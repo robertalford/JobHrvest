@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+ARG INSTALL_PLAYWRIGHT=0
+
 # Install system deps
 RUN apt-get update && apt-get install -y \
     curl \
@@ -9,23 +11,6 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libxml2-dev \
     libxslt-dev \
-    # Playwright chromium system deps (excluding unavailable font packages)
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    libpango-1.0-0 \
-    libcairo2 \
-    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -33,8 +18,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (no --with-deps since we installed manually above)
-RUN playwright install chromium
+# Playwright browsers are optional for local UI/API bootstraps.
+# Skip the large browser download unless explicitly requested at build time.
+RUN if [ "$INSTALL_PLAYWRIGHT" = "1" ]; then playwright install chromium; fi
 
 COPY . .
 

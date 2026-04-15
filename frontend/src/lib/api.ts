@@ -137,6 +137,35 @@ export const getLeadBatch = (batchId: string) =>
 export const getLeadBatchLeads = (batchId: string, page = 1, page_size = 50, status?: string, country?: string) =>
   api.get(`/lead-imports/batches/${batchId}/leads`, { params: { page, page_size, status: status || undefined, country: country || undefined } }).then(r => r.data);
 
+// Company Enrichment (Perplexity v2 / Codex-backed)
+export const uploadCompanyEnrichmentRun = (file: File) => {
+  const fd = new FormData(); fd.append('file', file);
+  return api.post('/company-enrichment/runs/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data);
+};
+export const getCompanyEnrichmentWorkerHealth = () =>
+  api.get('/company-enrichment/worker-health').then(r => r.data);
+export const startCompanyEnrichmentRun = (runId: string) =>
+  api.post(`/company-enrichment/runs/${runId}/start`).then(r => r.data);
+export const getCompanyEnrichmentRuns = (page = 1, page_size = 20) =>
+  api.get('/company-enrichment/runs', { params: { page, page_size } }).then(r => r.data);
+export const getCompanyEnrichmentRun = (runId: string) =>
+  api.get(`/company-enrichment/runs/${runId}`).then(r => r.data);
+export const getCompanyEnrichmentRunRows = (runId: string, page = 1, page_size = 50, status?: string) =>
+  api.get(`/company-enrichment/runs/${runId}/rows`, { params: { page, page_size, status: status || undefined } }).then(r => r.data);
+export const downloadCompanyEnrichmentRun = (runId: string) => {
+  return api.get(`/company-enrichment/runs/${runId}/download`, { responseType: 'blob' }).then((res) => {
+    const blob = new Blob([res.data], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `company_enrichment_${runId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+};
+
 // Excluded Sites (unified blocked-domain list)
 export const getExcludedSites = (page = 1, page_size = 50, search?: string, country?: string, site_type?: string) =>
   api.get('/excluded-sites/', { params: { page, page_size, search: search || undefined, country: country || undefined, site_type: site_type || undefined } }).then(r => r.data);

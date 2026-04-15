@@ -9,6 +9,8 @@ from app.models.site_template import SiteTemplate
 from app.models.extraction_comparison import ExtractionComparison
 from app.models.lead_import import LeadImport
 from app.models.lead_import_batch import LeadImportBatch
+from app.models.company_enrichment_run import CompanyEnrichmentRun
+from app.models.company_enrichment_row import CompanyEnrichmentRow
 from app.models.excluded_site import ExcludedSite
 from app.models.settings import WordFilter, SystemSetting
 from app.models.geo_location import GeoLocation, GeocodeCache
@@ -43,6 +45,8 @@ __all__ = [
     "ExtractionComparison",
     "LeadImport",
     "LeadImportBatch",
+    "CompanyEnrichmentRun",
+    "CompanyEnrichmentRow",
     "ExcludedSite",
     "WordFilter",
     "SystemSetting",
