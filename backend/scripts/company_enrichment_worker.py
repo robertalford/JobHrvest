@@ -54,6 +54,15 @@ OUTPUT_COLUMNS = ["company", "country", "job_page_url", "job_count", "comment"]
 WORKER_ID = f"{os.uname().nodename}:{os.getpid()}"
 CODEX_SEMAPHORE = threading.Semaphore(max(GLOBAL_MAX_WORKERS, 1))
 FETCH_SEMAPHORE = threading.Semaphore(max(FETCH_MAX_WORKERS, 1))
+BLOCKED_RESULT_DOMAINS = (
+    "jobstreet.com",
+    "seek.com",
+    "seek.com.au",
+    "jora.com",
+    "jobsdb.com",
+    "linkedin.com",
+    "indeed.com",
+)
 
 PRIMARY_PROMPT = """You are a specialist at finding company careers and job listing pages.
 
@@ -65,7 +74,15 @@ For the company "{company}" in "{country}", do ALL of the following, in order:
 4. If absolutely nothing exists, return "not found".
 
 Only consider official company or ATS-hosted pages that clearly belong to this company.
-Do NOT return generic job boards like Indeed, LinkedIn, or SEEK unless they are the company's clearly official posting page.
+Never return a URL on these blocked job-board domains or any of their subdomains:
+- jobstreet.com
+- seek.com
+- seek.com.au
+- jora.com
+- jobsdb.com
+- linkedin.com
+- indeed.com
+If your best candidate is on one of those blocked domains, treat it as not found and continue looking for an official company or ATS-hosted page instead.
 
 Respond ONLY with JSON:
 {{
@@ -82,6 +99,7 @@ Try again for the company "{company}" in "{country}" by searching the web more b
 - Consider search patterns like: "{company} careers", "{company} jobs", "{company} vacancies".
 - Consider ATS or hosted career platforms that are clearly the official posting channel for this company.
 - Prefer URLs which list multiple open positions or a structured job list.
+- Never return a URL on these blocked job-board domains or any of their subdomains: jobstreet.com, seek.com, seek.com.au, jora.com, jobsdb.com, linkedin.com, indeed.com.
 
 If you find an official job listing or careers page (even if on a third-party ATS), return that URL.
 If no such page exists, keep "not found".
@@ -146,7 +164,28 @@ def _parse_result(content: str) -> dict[str, str] | None:
     }
     if not values["job_page_url"] or not values["job_count"] or not values["comment"]:
         return None
+    if _is_blocked_result_url(values["job_page_url"]):
+        return {
+            "job_page_url": "not found",
+            "job_count": "not found",
+            "comment": "Blocked job-board domain returned; no official careers page confirmed.",
+        }
     return values
+
+
+def _is_blocked_result_url(url: str | None) -> bool:
+    if not url:
+        return False
+    normalized = url.strip()
+    if not normalized or normalized.lower() == "not found":
+        return False
+    try:
+        hostname = (urlparse(normalized).hostname or "").strip(".").lower()
+    except Exception:
+        return False
+    if not hostname:
+        return False
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in BLOCKED_RESULT_DOMAINS)
 
 
 def _clean_count_value(value: str | int | None) -> str | None:
@@ -164,6 +203,8 @@ def _clean_count_value(value: str | int | None) -> str | None:
 
 def _fetch_page_content(url: str) -> dict[str, str] | None:
     if not url or url.strip().lower() == "not found":
+        return None
+    if _is_blocked_result_url(url):
         return None
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -479,7 +520,12 @@ def _load_cached_result(session: Session, company: str, country: str) -> dict[st
             "cache_ttl_hours": CACHE_TTL_HOURS,
         },
     ).mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    cached = dict(row)
+    if _is_blocked_result_url(str(cached.get("job_page_url") or "")):
+        return None
+    return cached
 
 
 def _write_output_csv(session: Session, run_id: str) -> str:

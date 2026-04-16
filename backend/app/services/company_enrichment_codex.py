@@ -8,6 +8,7 @@ import json
 import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -20,6 +21,32 @@ class CompanyEnrichmentResult(BaseModel):
     comment: str = Field(description="Short explanation of the selected result or why it was not found")
 
 
+BLOCKED_RESULT_DOMAINS = (
+    "jobstreet.com",
+    "seek.com",
+    "seek.com.au",
+    "jora.com",
+    "jobsdb.com",
+    "linkedin.com",
+    "indeed.com",
+)
+
+
+def is_blocked_job_board_url(url: str | None) -> bool:
+    if not url:
+        return False
+    normalized = url.strip()
+    if not normalized or normalized.lower() == "not found":
+        return False
+    try:
+        hostname = (urlparse(normalized).hostname or "").strip(".").lower()
+    except Exception:
+        return False
+    if not hostname:
+        return False
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in BLOCKED_RESULT_DOMAINS)
+
+
 PRIMARY_PROMPT = """You are a specialist at finding company careers and job listing pages.
 
 For the company "{company}" in "{country}", do ALL of the following, in order:
@@ -30,7 +57,15 @@ For the company "{company}" in "{country}", do ALL of the following, in order:
 4. If absolutely nothing exists, return "not found".
 
 Only consider official company or ATS-hosted pages that clearly belong to this company.
-Do NOT return generic job boards like Indeed, LinkedIn, or SEEK unless they are the company's clearly official posting page.
+Never return a URL on these blocked job-board domains or any of their subdomains:
+- jobstreet.com
+- seek.com
+- seek.com.au
+- jora.com
+- jobsdb.com
+- linkedin.com
+- indeed.com
+If your best candidate is on one of those blocked domains, treat it as not found and continue looking for an official company or ATS-hosted page instead.
 
 Respond ONLY with JSON:
 {{
@@ -48,6 +83,7 @@ Try again for the company "{company}" in "{country}" by searching the web more b
 - Consider search patterns like: "{company} careers", "{company} jobs", "{company} vacancies".
 - Consider ATS or hosted career platforms that are clearly the official posting channel for this company.
 - Prefer URLs which list multiple open positions or a structured job list.
+- Never return a URL on these blocked job-board domains or any of their subdomains: jobstreet.com, seek.com, seek.com.au, jora.com, jobsdb.com, linkedin.com, indeed.com.
 
 If you find an official job listing or careers page (even if on a third-party ATS), return that URL.
 If no such page exists, keep "not found".
@@ -184,6 +220,13 @@ class CompanyEnrichmentCodexClient:
             return None
         try:
             data = json.loads(extract_json_object(content) or content)
-            return CompanyEnrichmentResult.model_validate(data)
+            parsed = CompanyEnrichmentResult.model_validate(data)
+            if is_blocked_job_board_url(parsed.job_page_url):
+                return CompanyEnrichmentResult(
+                    job_page_url="not found",
+                    job_count="not found",
+                    comment="Blocked job-board domain returned; no official careers page confirmed.",
+                )
+            return parsed
         except (json.JSONDecodeError, ValidationError):
             return None

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MxHHh2E8asG1AwadDc3dRm9d5nxSqwxhKlNGzPO6M1feha4jEhHMwEXljv60nE9
+\restrict aLiFK3X8yXLaY6mtCcbrVwRi3paOWimWQuuKlXHxFVyAHWcBV5zHSyCKhuLw4CX
 
 -- Dumped from database version 16.13
 -- Dumped by pg_dump version 16.13
@@ -317,6 +317,55 @@ CREATE TABLE public.companies (
     quality_score double precision,
     quality_scored_at timestamp with time zone,
     company_status text DEFAULT 'no_sites_new'::text NOT NULL
+);
+
+
+--
+-- Name: company_enrichment_rows; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.company_enrichment_rows (
+    id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    row_number integer NOT NULL,
+    company text NOT NULL,
+    country text NOT NULL,
+    status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
+    job_page_url text,
+    job_count text,
+    comment text,
+    raw_response_text text,
+    raw_response_json jsonb,
+    error_message text,
+    attempt_count integer DEFAULT 0,
+    created_at timestamp with time zone DEFAULT now(),
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    worker_id text
+);
+
+
+--
+-- Name: company_enrichment_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.company_enrichment_runs (
+    id uuid NOT NULL,
+    filename text NOT NULL,
+    original_filename text NOT NULL,
+    output_filename text,
+    file_size_bytes integer,
+    total_rows integer DEFAULT 0,
+    validation_status character varying(20) DEFAULT 'pending'::character varying,
+    validation_errors jsonb,
+    run_status character varying(20) DEFAULT 'pending'::character varying,
+    completed_rows integer DEFAULT 0,
+    failed_rows integer DEFAULT 0,
+    skipped_rows integer DEFAULT 0,
+    created_at timestamp with time zone DEFAULT now(),
+    run_started_at timestamp with time zone,
+    run_completed_at timestamp with time zone,
+    error_message text
 );
 
 
@@ -1225,6 +1274,22 @@ ALTER TABLE ONLY public.companies
 
 
 --
+-- Name: company_enrichment_rows company_enrichment_rows_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.company_enrichment_rows
+    ADD CONSTRAINT company_enrichment_rows_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: company_enrichment_runs company_enrichment_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.company_enrichment_runs
+    ADD CONSTRAINT company_enrichment_runs_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: company_stats company_stats_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1862,6 +1927,41 @@ CREATE INDEX ix_companies_status ON public.companies USING btree (company_status
 
 
 --
+-- Name: ix_company_enrichment_rows_company; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_company_enrichment_rows_company ON public.company_enrichment_rows USING btree (company);
+
+
+--
+-- Name: ix_company_enrichment_rows_country; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_company_enrichment_rows_country ON public.company_enrichment_rows USING btree (country);
+
+
+--
+-- Name: ix_company_enrichment_rows_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_company_enrichment_rows_run_id ON public.company_enrichment_rows USING btree (run_id);
+
+
+--
+-- Name: ix_company_enrichment_rows_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_company_enrichment_rows_status ON public.company_enrichment_rows USING btree (status);
+
+
+--
+-- Name: ix_company_enrichment_rows_worker_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_company_enrichment_rows_worker_id ON public.company_enrichment_rows USING btree (worker_id);
+
+
+--
 -- Name: ix_crawl_logs_company_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2308,6 +2408,14 @@ ALTER TABLE ONLY public.companies
 
 
 --
+-- Name: company_enrichment_rows company_enrichment_rows_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.company_enrichment_rows
+    ADD CONSTRAINT company_enrichment_rows_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.company_enrichment_runs(id) ON DELETE CASCADE;
+
+
+--
 -- Name: company_stats company_stats_company_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2591,5 +2699,5 @@ ALTER TABLE ONLY public.site_templates
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MxHHh2E8asG1AwadDc3dRm9d5nxSqwxhKlNGzPO6M1feha4jEhHMwEXljv60nE9
+\unrestrict aLiFK3X8yXLaY6mtCcbrVwRi3paOWimWQuuKlXHxFVyAHWcBV5zHSyCKhuLw4CX
 

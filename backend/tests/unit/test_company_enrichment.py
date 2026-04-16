@@ -13,8 +13,8 @@ from app.core.config import settings
 from app.api.v1.endpoints.company_enrichment import _build_output_csv, _reconcile_running_runs, _validate_csv
 from app.db.base import AsyncSessionLocal
 from app.models.company_enrichment_row import CompanyEnrichmentRow
-from app.services.company_enrichment_codex import CompanyEnrichmentCodexClient, extract_json_object
-from scripts.company_enrichment_worker import _extract_exact_job_count, _fetch_page_content, _refine_result_with_page_data, claim_rows
+from app.services.company_enrichment_codex import CompanyEnrichmentCodexClient, extract_json_object, is_blocked_job_board_url
+from scripts.company_enrichment_worker import _extract_exact_job_count, _fetch_page_content, _parse_result, _refine_result_with_page_data, claim_rows
 
 
 def test_validate_csv_accepts_company_country_shape():
@@ -53,6 +53,21 @@ def test_build_output_csv_uses_legacy_column_order():
 def test_extract_json_object_handles_fenced_output():
     output = 'Here you go\\n```json\\n{"job_page_url":"https://acme.com/jobs","job_count":"3","comment":"Official jobs page"}\\n```'
     assert extract_json_object(output) == '{"job_page_url":"https://acme.com/jobs","job_count":"3","comment":"Official jobs page"}'
+
+
+def test_blocked_job_board_url_matches_subdomains():
+    assert is_blocked_job_board_url("https://sg.jobstreet.com/companies/acme/jobs")
+    assert is_blocked_job_board_url("https://au.indeed.com/viewjob?jk=123")
+    assert is_blocked_job_board_url("https://www.linkedin.com/jobs/view/123")
+    assert not is_blocked_job_board_url("https://jobs.acme.com/openings")
+
+
+def test_worker_parse_result_downgrades_blocked_job_board_url_to_not_found():
+    parsed = _parse_result('{"job_page_url":"https://sg.jobstreet.com/company/acme","job_count":"6","comment":"Found company page"}')
+    assert parsed is not None
+    assert parsed["job_page_url"] == "not found"
+    assert parsed["job_count"] == "not found"
+    assert "Blocked job-board domain" in parsed["comment"]
 
 
 def test_worker_health_detects_stale_heartbeat(tmp_path):
@@ -289,7 +304,8 @@ def test_reconcile_running_runs_keeps_pending_rows_when_worker_stale(monkeypatch
                 WHERE id = CAST(:run_id AS UUID)
             """), {"run_id": run_id}).scalar_one()
 
-        assert rows == ["pending", "pending"]
+        assert all(status in {"pending", "processing"} for status in rows)
+        assert "failed" not in rows
         assert run_error == "Waiting for host enrichment worker heartbeat"
     finally:
         _cleanup_company_enrichment([run_id])

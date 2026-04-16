@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import get_db
 from app.models.company_enrichment_run import CompanyEnrichmentRun
 from app.models.company_enrichment_row import CompanyEnrichmentRow
-from app.services.company_enrichment_codex import CompanyEnrichmentCodexClient
+from app.services.company_enrichment_codex import CompanyEnrichmentCodexClient, is_blocked_job_board_url
 from app.core.config import settings
 
 router = APIRouter()
@@ -108,6 +108,8 @@ async def _get_cached_results(
 
     cache: dict[tuple[str, str], CompanyEnrichmentRow] = {}
     for row in cached_rows:
+        if is_blocked_job_board_url(row.job_page_url):
+            continue
         key = (row.company.strip().lower(), row.country.strip().lower())
         cache.setdefault(key, row)
     return cache
